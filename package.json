@@ -1,0 +1,51 @@
+{
+  "name": "death-pdf",
+  "version": "1.0.0",
+  "description": "Death PDF - leitor e anotador de PDF minimalista, com modo escuro, caneta sensivel a pressao e atalhos configuraveis.",
+  "main": "main.js",
+  "author": "Joao Pedro",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win nsis portable",
+    "dist:portable": "electron-builder --win portable",
+    "dist:linux": "electron-builder --linux AppImage",
+    "dist:dir": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.joaopedro.deathpdf",
+    "productName": "Death PDF",
+    "files": ["main.js", "preload.js", "src/**/*", "assets/**/*"],
+    "fileAssociations": [
+      {
+        "ext": "pdf",
+        "name": "PDF Document",
+        "description": "Documento PDF",
+        "role": "Viewer",
+        "icon": "assets/icon.ico"
+      }
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "portable": { "artifactName": "Death-PDF-${version}-portable.exe" },
+    "linux": { "icon": "assets/icon.png", "target": ["AppImage"], "category": "Office" },
+    "mac": { "icon": "assets/icon.png", "target": ["dmg"] }
+  }
+}

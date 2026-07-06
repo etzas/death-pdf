@@ -1,0 +1,51 @@
+name: Build Windows
+
+# Compila o Death PDF num Windows de verdade (runner windows-latest).
+# Dispara de dois jeitos:
+#   1. Manualmente, pela aba "Actions" do GitHub (botao "Run workflow").
+#   2. Automaticamente ao criar uma tag de versao, ex: git tag v1.0.0 && git push --tags
+#      Nesse caso tambem publica um Release com o .exe pronto pra baixar.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout do codigo
+        uses: actions/checkout@v4
+
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Compilar app Windows (.exe)
+        run: npx electron-builder --win nsis portable --publish never
+        env:
+          # sem certificado de assinatura -> gera .exe nao-assinado (normal)
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Guardar os instaladores como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: death-pdf-windows
+          path: |
+            dist/*.exe
+          if-no-files-found: error
+
+      - name: Publicar Release (somente em tags v*)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe

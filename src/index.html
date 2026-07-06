@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Death PDF</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=UnifrakturCook:wght@700&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- ===================== TOOLBAR ===================== -->
+  <header id="toolbar">
+    <div class="tb-group brand-group">
+      <span class="brand">Death<span class="brand-tail">PDF</span></span>
+    </div>
+
+    <div class="tb-divider"></div>
+
+    <div class="tb-group">
+      <button class="tb-btn" data-action="open" title="Abrir PDF">
+        <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      </button>
+    </div>
+
+    <div class="tb-divider"></div>
+
+    <!-- Tools -->
+    <div class="tb-group" id="tool-group">
+      <button class="tb-btn tool" data-tool="select" title="Selecionar / mover">
+        <svg viewBox="0 0 24 24"><path d="M4 3l7 17 2.5-6.5L20 11z"/></svg>
+      </button>
+      <button class="tb-btn tool" data-tool="pen" title="Caneta">
+        <svg viewBox="0 0 24 24"><path d="M4 20l4-1L19 8a2.8 2.8 0 0 0-4-4L4 15z"/></svg>
+      </button>
+      <button class="tb-btn tool" data-tool="highlighter" title="Marca-texto">
+        <svg viewBox="0 0 24 24"><path d="M5 18l3 1 9-9-4-4-9 9z"/><path d="M4 21h6"/></svg>
+      </button>
+      <button class="tb-btn tool" data-tool="eraser" title="Borracha">
+        <svg viewBox="0 0 24 24"><path d="M4 15l7-7 6 6-4 4H8z"/><path d="M4 21h16"/></svg>
+      </button>
+      <button class="tb-btn tool" data-tool="pan" title="Mao (arrastar)">
+        <svg viewBox="0 0 24 24"><path d="M8 12V6a1.5 1.5 0 0 1 3 0v5m0-1V5a1.5 1.5 0 0 1 3 0v6m0-1V6a1.5 1.5 0 0 1 3 0v8a5 5 0 0 1-5 5h-1a6 6 0 0 1-4.5-2L5 15a1.6 1.6 0 0 1 2.4-2z"/></svg>
+      </button>
+    </div>
+
+    <!-- Contextual controls for the active drawing tool -->
+    <div class="tb-group tool-options" id="tool-options" hidden>
+      <div class="swatches" id="swatches"></div>
+      <label class="width-ctl">
+        <span id="width-label">Espessura</span>
+        <input type="range" id="width-slider" min="1" max="40" value="3" />
+      </label>
+    </div>
+
+    <div class="tb-spacer"></div>
+
+    <!-- View controls -->
+    <div class="tb-group">
+      <button class="tb-btn" data-action="undo" title="Desfazer">
+        <svg viewBox="0 0 24 24"><path d="M9 7L4 12l5 5"/><path d="M4 12h11a5 5 0 0 1 0 10h-1"/></svg>
+      </button>
+      <button class="tb-btn" data-action="redo" title="Refazer">
+        <svg viewBox="0 0 24 24"><path d="M15 7l5 5-5 5"/><path d="M20 12H9a5 5 0 0 0 0 10h1"/></svg>
+      </button>
+    </div>
+
+    <div class="tb-divider"></div>
+
+    <div class="tb-group">
+      <button class="tb-btn" data-action="zoomOut" title="Diminuir zoom">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M8 11h6M20 20l-4-4"/></svg>
+      </button>
+      <span id="zoom-label">100%</span>
+      <button class="tb-btn" data-action="zoomIn" title="Aumentar zoom">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M11 8v6M8 11h6M20 20l-4-4"/></svg>
+      </button>
+      <button class="tb-btn" data-action="fitWidth" title="Ajustar a largura">
+        <svg viewBox="0 0 24 24"><path d="M4 8v8M20 8v8M4 12h16M7 9l-3 3 3 3M17 9l3 3-3 3"/></svg>
+      </button>
+    </div>
+
+    <div class="tb-divider"></div>
+
+    <div class="tb-group page-group">
+      <input type="text" id="page-input" value="0" inputmode="numeric" />
+      <span id="page-total">/ 0</span>
+    </div>
+
+    <div class="tb-divider"></div>
+
+    <div class="tb-group">
+      <button class="tb-btn" data-action="darkMode" title="Modo escuro do PDF" id="dark-btn">
+        <svg viewBox="0 0 24 24"><path d="M20 14A8 8 0 1 1 10 4a6 6 0 0 0 10 10z"/></svg>
+      </button>
+      <button class="tb-btn" data-action="export" title="Exportar PDF com anotacoes">
+        <svg viewBox="0 0 24 24"><path d="M12 3v12M8 11l4 4 4-4"/><path d="M5 21h14"/></svg>
+      </button>
+      <button class="tb-btn" data-action="settings" title="Atalhos e preferencias">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ===================== VIEWER ===================== -->
+  <main id="viewer">
+    <div id="empty-state">
+      <span class="empty-mark">Death<span class="empty-tail">PDF</span></span>
+      <p>Abra um PDF para comecar.</p>
+      <button class="ghost-btn" data-action="open">Abrir PDF</button>
+      <p class="hint">Atalho: <kbd id="hint-open">Ctrl+O</kbd></p>
+    </div>
+    <div id="pages"></div>
+  </main>
+
+  <!-- ===================== STATUS ===================== -->
+  <div id="status" hidden></div>
+
+  <!-- ===================== SETTINGS MODAL ===================== -->
+  <div id="modal-backdrop" hidden>
+    <div id="settings-modal" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h2>Atalhos</h2>
+        <button class="tb-btn" id="close-settings" title="Fechar">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <p class="modal-sub">Clique em um atalho e pressione a nova combinacao. Esc cancela.</p>
+      <div id="shortcut-list"></div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" id="reset-shortcuts">Restaurar padrao</button>
+      </footer>
+    </div>
+  </div>
+
+  <script src="vendor/pdf-lib.min.js"></script>
+  <script type="module" src="renderer.js"></script>
+</body>
+</html>
