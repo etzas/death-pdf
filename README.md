@@ -91,16 +91,26 @@ direto no Death PDF. Se o app ja estiver aberto, o PDF carrega na mesma janela.
 
 ## Funcoes
 
-- **Modo escuro do PDF** — inverte as cores da pagina; suas marcacoes NAO sao
-  invertidas. Botao de lua, ou `Ctrl+Shift+D`.
+- **Temas de leitura do PDF** — varios temas configuraveis (Normal, Escuro
+  invertido, Preto e branco, Sepia escuro, Noturno). Aplicam um filtro so na
+  pagina renderizada; suas marcacoes NAO sao alteradas. Botao de lua abre o
+  menu de temas; `Ctrl+Shift+D` alterna rapido entre o tema escuro e o normal.
 - **Caneta com pressao real** da mesa digitalizadora (Pointer Events +
-  `getCoalescedEvents()` para tracos precisos).
-- **Marca-texto**, **borracha**, **mao/pan** (ou segure `Espaco`).
+  `getCoalescedEvents()` para tracos precisos). Ao desenhar, o arrasto da caneta
+  nao "vira" rolagem da pagina (`touch-action: none` no modo de desenho).
+- **Marca-texto**, **borracha**, **mao/pan** (ou segure `Espaco`). Apertar de
+  novo o atalho da ferramenta ativa volta para **Selecionar**.
+- **Girar a pagina** 90 graus no sentido horario e anti-horario (afeta a
+  visualizacao e o PDF exportado).
+- **Mover com as setas do teclado** (inclusive no modo de desenho).
+- **Tela cheia** (`F11`).
 - **Zoom** por botoes, `Ctrl + / Ctrl -`, ou `Ctrl + roda do mouse`.
 - **Desfazer / Refazer**.
 - **Exportar PDF anotado** — gera um PDF novo com os tracos embutidos.
-- **Salvamento automatico** das anotacoes num arquivo `.deathpdf.json` ao lado
-  do PDF (voltam sozinhas ao reabrir).
+- **Salvamento manual** das anotacoes com `Ctrl+S` (num arquivo
+  `.deathpdf.json` ao lado do PDF; voltam sozinhas ao reabrir). Nao ha mais
+  salvamento automatico — um ponto `●` no titulo indica alteracoes nao salvas, e
+  o app avisa antes de fechar ou abrir outro PDF com anotacoes pendentes.
 
 ## Atalhos (padrao — todos editaveis na engrenagem)
 
@@ -109,12 +119,16 @@ direto no Death PDF. Se o app ja estiver aberto, o PDF carrega na mesma janela.
 | Abrir PDF               | `Ctrl+O`            |
 | Selecionar / Caneta / Marca-texto / Borracha | `V` / `P` / `H` / `E` |
 | Mao (temporaria)        | segurar `Espaco`    |
-| Modo escuro do PDF      | `Ctrl+Shift+D`      |
+| Tema escuro do PDF      | `Ctrl+Shift+D`      |
 | Desfazer / Refazer      | `Ctrl+Z` / `Ctrl+Shift+Z` |
 | Zoom + / -              | `Ctrl+=` / `Ctrl+-` |
 | Ajustar a largura       | `Ctrl+0`            |
+| Mover / rolar a pagina  | setas do teclado    |
 | Proxima / pagina ant.   | `PageDown` / `PageUp` |
+| Girar horario / anti    | `Ctrl+Shift+→` / `Ctrl+Shift+←` |
+| Salvar anotacoes        | `Ctrl+S`            |
 | Exportar PDF anotado    | `Ctrl+E`            |
+| Tela cheia              | `F11`               |
 | Preferencias            | `Ctrl+,`            |
 | Limpar pagina           | `Ctrl+Shift+Backspace` |
 

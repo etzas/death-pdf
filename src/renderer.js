@@ -16,9 +16,11 @@ const state = {
   numPages: 0,
   pageDims: [], // {w, h} at scale 1, index by page-1
   scale: 1,
+  rotation: 0, // 0 | 90 | 180 | 270, clockwise degrees
   tool: 'select',
   prevTool: 'select',
-  darkMode: false,
+  theme: 'none', // PDF viewing theme id (see PDF_THEMES)
+  lastDark: 'invert', // remembered dark theme for the quick toggle
   penColor: '#ececec',
   penWidth: 3,
   hlColor: '#f5c518',
@@ -27,11 +29,23 @@ const state = {
   annotations: {}, // { [pageNum]: [stroke] }
   undoStack: [],
   redoStack: [],
+  dirty: false, // unsaved annotation changes
 };
 
 const PEN_PALETTE = ['#ececec', '#c8102e', '#f5c518', '#38bdf8', '#4ade80'];
 const HL_PALETTE = ['#f5c518', '#c8102e', '#4ade80', '#38bdf8', '#a78bfa'];
 const MAX_UNDO = 80;
+
+// PDF viewing themes. `none` shows the page untouched; the others apply a CSS
+// filter to the rendered PDF only (annotations are never inverted). Configured
+// in styles.css via #viewer[data-theme='<id>'].
+const PDF_THEMES = [
+  { id: 'none', label: 'Normal' },
+  { id: 'invert', label: 'Escuro (invertido)' },
+  { id: 'bw', label: 'Preto e branco' },
+  { id: 'sepia', label: 'Sepia escuro' },
+  { id: 'night', label: 'Noturno (suave)' },
+];
 
 // ============================================================
 // Shortcuts
@@ -50,7 +64,11 @@ const DEFAULT_SHORTCUTS = {
   fitWidth: 'ctrl+0',
   nextPage: 'pagedown',
   prevPage: 'pageup',
+  rotateCW: 'ctrl+shift+right',
+  rotateCCW: 'ctrl+shift+left',
+  save: 'ctrl+s',
   export: 'ctrl+e',
+  fullscreen: 'f11',
   settings: 'ctrl+,',
   clearPage: 'ctrl+shift+backspace',
 };
@@ -61,7 +79,7 @@ const ACTION_LABELS = {
   toolPen: 'Ferramenta: caneta',
   toolHighlighter: 'Ferramenta: marca-texto',
   toolEraser: 'Ferramenta: borracha',
-  darkMode: 'Modo escuro do PDF',
+  darkMode: 'Alternar tema escuro do PDF',
   undo: 'Desfazer',
   redo: 'Refazer',
   zoomIn: 'Aumentar zoom',
@@ -69,7 +87,11 @@ const ACTION_LABELS = {
   fitWidth: 'Ajustar a largura',
   nextPage: 'Proxima pagina',
   prevPage: 'Pagina anterior',
+  rotateCW: 'Girar 90 (horario)',
+  rotateCCW: 'Girar 90 (anti-horario)',
+  save: 'Salvar anotacoes',
   export: 'Exportar PDF anotado',
+  fullscreen: 'Tela cheia',
   settings: 'Abrir preferencias',
   clearPage: 'Limpar anotacoes da pagina',
 };
@@ -142,7 +164,37 @@ const swatchesEl = document.getElementById('swatches');
 const widthSlider = document.getElementById('width-slider');
 const widthLabel = document.getElementById('width-label');
 const darkBtn = document.getElementById('dark-btn');
+const themeMenu = document.getElementById('theme-menu');
+const saveBtn = document.getElementById('save-btn');
 const statusEl = document.getElementById('status');
+
+// ============================================================
+// Rotation coordinate mapping
+// Annotations are stored in the PDF's *unrotated* normalized space
+// ([0..1], origin top-left). These map to/from the on-screen (rotated)
+// canvas whose CSS size is (W, H). rot is clockwise degrees.
+// ============================================================
+function normToCanvas(nx, ny, W, H, rot) {
+  switch (rot) {
+    case 90: return [(1 - ny) * W, nx * H];
+    case 180: return [(1 - nx) * W, (1 - ny) * H];
+    case 270: return [ny * W, (1 - nx) * H];
+    default: return [nx * W, ny * H];
+  }
+}
+function canvasToNorm(cx, cy, W, H, rot) {
+  switch (rot) {
+    case 90: return [cy / H, 1 - cx / W];
+    case 180: return [1 - cx / W, 1 - cy / H];
+    case 270: return [1 - cy / H, cx / W];
+    default: return [cx / W, cy / H];
+  }
+}
+// Displayed page dimensions at scale 1, accounting for rotation.
+function dispDim(pageIndex1) {
+  const d = state.pageDims[pageIndex1 - 1];
+  return state.rotation % 180 === 0 ? { w: d.w, h: d.h } : { w: d.h, h: d.w };
+}
 
 // ============================================================
 // Toast
@@ -159,8 +211,17 @@ function toast(msg) {
 // PDF loading
 // ============================================================
 async function openViaDialog() {
+  if (!confirmDiscardIfDirty()) return;
   const res = await window.dpdf.openPdf();
   if (res) await loadPdf(res);
+}
+
+// Ask before throwing away unsaved annotations. Returns true to proceed.
+function confirmDiscardIfDirty() {
+  if (!state.dirty) return true;
+  return window.confirm(
+    'Ha anotacoes nao salvas. Deseja descarta-las e continuar?'
+  );
 }
 
 async function loadPdf({ bytes, path, name }) {
@@ -186,14 +247,19 @@ async function loadPdf({ bytes, path, name }) {
     state.annotations = {};
     state.undoStack = [];
     state.redoStack = [];
+    state.rotation = 0;
+    state.dirty = false;
     const saved = await window.dpdf.loadAnnotations(path);
     if (saved && saved.annotations) {
       state.annotations = saved.annotations;
-      if (typeof saved.darkMode === 'boolean') setDarkMode(saved.darkMode);
+      if (typeof saved.rotation === 'number') state.rotation = saved.rotation;
+      // Migrate the legacy `darkMode` boolean to the new theme system.
+      if (saved.theme) setTheme(saved.theme);
+      else if (saved.darkMode === true) setTheme('invert');
     }
 
     emptyState.classList.add('hidden');
-    document.title = `${name} — Death PDF`;
+    updateTitle();
 
     fitWidth(); // sets scale and builds pages
     toast(`${name} — ${state.numPages} paginas`);
@@ -213,7 +279,7 @@ function buildPages() {
   if (io) io.disconnect();
 
   for (let i = 1; i <= state.numPages; i++) {
-    const dim = state.pageDims[i - 1];
+    const dim = dispDim(i);
     const w = dim.w * state.scale;
     const h = dim.h * state.scale;
 
@@ -277,7 +343,7 @@ async function renderPage(pageEl) {
   const num = +pageEl.dataset.page;
   try {
     const page = await state.pdf.getPage(num);
-    const viewport = page.getViewport({ scale: state.scale });
+    const viewport = page.getViewport({ scale: state.scale, rotation: state.rotation });
     const dpr = window.devicePixelRatio || 1;
 
     const pdfCanvas = pageEl.querySelector('.pdf-layer');
@@ -353,6 +419,8 @@ function redrawAnnotations(pageEl) {
 function drawStroke(ctx, stroke, vw, vh) {
   const pts = stroke.points;
   if (!pts.length) return;
+  const rot = state.rotation;
+  const P = (pt) => normToCanvas(pt[0], pt[1], vw, vh, rot);
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -362,19 +430,22 @@ function drawStroke(ctx, stroke, vw, vh) {
     ctx.globalAlpha = 0.32;
     ctx.lineWidth = stroke.width;
     ctx.beginPath();
-    ctx.moveTo(pts[0][0] * vw, pts[0][1] * vh);
+    const [x0, y0] = P(pts[0]);
+    ctx.moveTo(x0, y0);
     for (let i = 1; i < pts.length; i++) {
-      ctx.lineTo(pts[i][0] * vw, pts[i][1] * vh);
+      const [x, y] = P(pts[i]);
+      ctx.lineTo(x, y);
     }
-    if (pts.length === 1) ctx.lineTo(pts[0][0] * vw + 0.1, pts[0][1] * vh);
+    if (pts.length === 1) ctx.lineTo(x0 + 0.1, y0);
     ctx.stroke();
   } else {
     // Pen: variable width per segment based on pressure.
     ctx.globalAlpha = 1;
     if (pts.length === 1) {
+      const [x, y] = P(pts[0]);
       ctx.fillStyle = stroke.color;
       ctx.beginPath();
-      ctx.arc(pts[0][0] * vw, pts[0][1] * vh, stroke.width / 2, 0, Math.PI * 2);
+      ctx.arc(x, y, stroke.width / 2, 0, Math.PI * 2);
       ctx.fill();
     } else {
       for (let i = 1; i < pts.length; i++) {
@@ -382,9 +453,11 @@ function drawStroke(ctx, stroke, vw, vh) {
         const b = pts[i];
         const pAvg = (a[2] + b[2]) / 2;
         ctx.lineWidth = stroke.width * pressureScale(stroke, pAvg);
+        const [ax, ay] = P(a);
+        const [bx, by] = P(b);
         ctx.beginPath();
-        ctx.moveTo(a[0] * vw, a[1] * vh);
-        ctx.lineTo(b[0] * vw, b[1] * vh);
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by);
         ctx.stroke();
       }
     }
@@ -409,7 +482,7 @@ function attachDrawingHandlers(pageEl, canvas) {
   const relPoint = (clientX, clientY) => {
     const r = canvas.getBoundingClientRect();
     const { w, h } = pageCssSize(pageEl);
-    return [(clientX - r.left) / w, (clientY - r.top) / h];
+    return canvasToNorm(clientX - r.left, clientY - r.top, w, h, state.rotation);
   };
 
   canvas.addEventListener('pointerdown', (e) => {
@@ -421,7 +494,7 @@ function attachDrawingHandlers(pageEl, canvas) {
 
     if (state.tool === 'eraser') {
       erasing = true;
-      eraseAt(pageEl, e.clientX, e.clientY, relPoint);
+      eraseAt(pageEl, e.clientX, e.clientY);
       return;
     }
 
@@ -438,7 +511,7 @@ function attachDrawingHandlers(pageEl, canvas) {
 
   canvas.addEventListener('pointermove', (e) => {
     if (erasing) {
-      eraseAt(pageEl, e.clientX, e.clientY, relPoint);
+      eraseAt(pageEl, e.clientX, e.clientY);
       return;
     }
     if (!active) return;
@@ -451,6 +524,7 @@ function attachDrawingHandlers(pageEl, canvas) {
         : [e];
     const ctx = annoCtxFor(pageEl);
     const { w, h } = pageCssSize(pageEl);
+    const rot = state.rotation;
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -463,9 +537,11 @@ function attachDrawingHandlers(pageEl, canvas) {
       active.points.push([x, y, pr]);
       if (active.tool === 'highlighter') ctx.lineWidth = active.width;
       else ctx.lineWidth = active.width * pressureScale(active, (prev[2] + pr) / 2);
+      const [px, py] = normToCanvas(prev[0], prev[1], w, h, rot);
+      const [cx, cy] = normToCanvas(x, y, w, h, rot);
       ctx.beginPath();
-      ctx.moveTo(prev[0] * w, prev[1] * h);
-      ctx.lineTo(x * w, y * h);
+      ctx.moveTo(px, py);
+      ctx.lineTo(cx, cy);
       ctx.stroke();
     }
     ctx.restore();
@@ -476,10 +552,10 @@ function attachDrawingHandlers(pageEl, canvas) {
       (state.annotations[num] ||= []).push(active);
       pushUndo(num, beforeSnapshot);
       redrawAnnotations(pageEl); // clean composited redraw (fixes highlighter overlap)
-      scheduleSave();
+      markDirty();
     } else if (erasing) {
       pushUndo(num, beforeSnapshot);
-      scheduleSave();
+      markDirty();
     }
     active = null;
     erasing = false;
@@ -490,23 +566,30 @@ function attachDrawingHandlers(pageEl, canvas) {
   canvas.addEventListener('pointercancel', () => finish(+pageEl.dataset.page));
 }
 
-function eraseAt(pageEl, clientX, clientY, relPoint) {
+function eraseAt(pageEl, clientX, clientY) {
   const num = +pageEl.dataset.page;
   const strokes = state.annotations[num];
   if (!strokes || !strokes.length) return;
-  const [px, py] = relPoint(clientX, clientY);
+  const canvas = pageEl.querySelector('.anno-layer');
+  const r = canvas.getBoundingClientRect();
   const { w, h } = pageCssSize(pageEl);
-  const rNormX = state.eraserWidth / w / 2;
-  const rNormY = state.eraserWidth / h / 2;
+  const ex = clientX - r.left;
+  const ey = clientY - r.top;
+  const rad = state.eraserWidth / 2;
+  const rot = state.rotation;
   const before = strokes.length;
   state.annotations[num] = strokes.filter((s) => {
     return !s.points.some((pt) => {
-      const dx = (pt[0] - px) / rNormX;
-      const dy = (pt[1] - py) / rNormY;
-      return dx * dx + dy * dy <= 1;
+      const [cx, cy] = normToCanvas(pt[0], pt[1], w, h, rot);
+      const dx = cx - ex;
+      const dy = cy - ey;
+      return dx * dx + dy * dy <= rad * rad;
     });
   });
-  if (state.annotations[num].length !== before) redrawAnnotations(pageEl);
+  if (state.annotations[num].length !== before) {
+    redrawAnnotations(pageEl);
+    markDirty();
+  }
 }
 
 // ============================================================
@@ -529,7 +612,7 @@ function undo() {
   });
   state.annotations[op.pageNum] = clone(op.strokes);
   redrawPage(op.pageNum);
-  scheduleSave();
+  markDirty();
 }
 function redo() {
   const op = state.redoStack.pop();
@@ -540,7 +623,7 @@ function redo() {
   });
   state.annotations[op.pageNum] = clone(op.strokes);
   redrawPage(op.pageNum);
-  scheduleSave();
+  markDirty();
 }
 function redrawPage(num) {
   const el = pagesEl.querySelector(`.page[data-page="${num}"]`);
@@ -553,25 +636,45 @@ function clearCurrentPage() {
   pushUndo(num, before);
   state.annotations[num] = [];
   redrawPage(num);
-  scheduleSave();
+  markDirty();
   toast(`Anotacoes da pagina ${num} removidas`);
 }
 
 // ============================================================
-// Save (debounced sidecar autosave)
+// Save (manual — no autosave; Ctrl+S writes the sidecar)
 // ============================================================
-let saveTimer = null;
-function scheduleSave() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(doSave, 600);
+function markDirty() {
+  if (!state.pdf) return;
+  state.dirty = true;
+  updateTitle();
 }
-async function doSave() {
-  if (!state.pdfPath) return;
-  await window.dpdf.saveAnnotations(state.pdfPath, {
+
+function updateTitle() {
+  const dot = state.dirty ? '● ' : '';
+  const name = state.pdfName ? `${state.pdfName} — ` : '';
+  document.title = `${dot}${name}Death PDF`;
+  if (saveBtn) saveBtn.classList.toggle('dirty', state.dirty);
+  window.dpdf.setDirty?.(state.dirty);
+}
+
+async function save() {
+  if (!state.pdfPath) {
+    toast('Nenhum PDF aberto.');
+    return;
+  }
+  const res = await window.dpdf.saveAnnotations(state.pdfPath, {
     version: 1,
-    darkMode: state.darkMode,
+    theme: state.theme,
+    rotation: state.rotation,
     annotations: state.annotations,
   });
+  if (res === true) {
+    state.dirty = false;
+    updateTitle();
+    toast('Anotacoes salvas.');
+  } else {
+    toast('Falha ao salvar as anotacoes.');
+  }
 }
 
 // ============================================================
@@ -587,7 +690,7 @@ function setScale(newScale, anchor = true) {
 
   // Resize placeholders, drop rendered canvases so they re-render sharp.
   pagesEl.querySelectorAll('.page').forEach((pageEl) => {
-    const dim = state.pageDims[+pageEl.dataset.page - 1];
+    const dim = dispDim(+pageEl.dataset.page);
     pageEl.style.width = dim.w * newScale + 'px';
     pageEl.style.height = dim.h * newScale + 'px';
     clearPageCanvas(pageEl);
@@ -604,7 +707,7 @@ function zoomOut() { setScale(state.scale / 1.15); }
 
 function fitWidth() {
   if (!state.pdf) return;
-  const dim = state.pageDims[getCurrentPage() - 1] || state.pageDims[0];
+  const dim = dispDim(getCurrentPage()) || dispDim(1);
   const avail = viewer.clientWidth - 48; // padding room
   const scale = avail / dim.w;
   state.scale = scale;
@@ -633,15 +736,69 @@ function goToPage(num) {
 }
 
 // ============================================================
-// Dark mode
+// PDF themes
 // ============================================================
-function setDarkMode(on) {
-  state.darkMode = on;
-  viewer.classList.toggle('dark', on);
-  darkBtn.classList.toggle('on', on);
-  scheduleSave();
+function setTheme(id) {
+  if (!PDF_THEMES.some((t) => t.id === id)) id = 'none';
+  state.theme = id;
+  if (id !== 'none') state.lastDark = id;
+  viewer.dataset.theme = id;
+  darkBtn.classList.toggle('on', id !== 'none');
+  localStorage.setItem('deathpdf.theme', id);
+  renderThemeMenu();
 }
-function toggleDarkMode() { setDarkMode(!state.darkMode); }
+// Quick toggle bound to the keyboard shortcut: flips between the current
+// dark theme and "none".
+function toggleTheme() {
+  setTheme(state.theme === 'none' ? state.lastDark || 'invert' : 'none');
+}
+
+function renderThemeMenu() {
+  if (!themeMenu) return;
+  themeMenu.innerHTML = '';
+  for (const t of PDF_THEMES) {
+    const b = document.createElement('button');
+    b.className = 'popover-item' + (t.id === state.theme ? ' active' : '');
+    b.textContent = t.label;
+    b.addEventListener('click', () => {
+      setTheme(t.id);
+      closeThemeMenu();
+    });
+    themeMenu.appendChild(b);
+  }
+}
+function toggleThemeMenu() {
+  if (themeMenu.hidden) {
+    renderThemeMenu();
+    themeMenu.hidden = false;
+  } else {
+    closeThemeMenu();
+  }
+}
+function closeThemeMenu() {
+  if (themeMenu) themeMenu.hidden = true;
+}
+
+// ============================================================
+// Rotation
+// ============================================================
+function rotate(deltaDeg) {
+  if (!state.pdf) return;
+  state.rotation = ((state.rotation + deltaDeg) % 360 + 360) % 360;
+  const cur = getCurrentPage();
+  buildPages(); // placeholders resize with swapped dimensions
+  renderVisible();
+  goToPage(cur);
+  markDirty();
+  toast(`Rotacao: ${state.rotation}°`);
+}
+
+// ============================================================
+// Fullscreen
+// ============================================================
+function toggleFullscreen() {
+  window.dpdf.toggleFullscreen();
+}
 
 // ============================================================
 // Tools
@@ -653,6 +810,12 @@ function setTool(tool) {
     .querySelectorAll('#tool-group .tool')
     .forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
   renderToolOptions();
+}
+
+// Pressing a tool's shortcut (or clicking its button) again turns it off,
+// falling back to the default select tool.
+function toggleTool(tool) {
+  setTool(state.tool === tool ? 'select' : tool);
 }
 
 function renderToolOptions() {
@@ -704,9 +867,19 @@ async function exportPdf() {
   if (!state.pdf || !window.PDFLib) return;
   toast('Gerando PDF...');
   try {
-    const { PDFDocument, rgb, LineCapStyle } = window.PDFLib;
+    const { PDFDocument, rgb, LineCapStyle, degrees } = window.PDFLib;
     const doc = await PDFDocument.load(state.pdfBytes);
     const pages = doc.getPages();
+
+    // Carry the current viewing rotation into the exported file. Strokes
+    // are stored in the page's original space, so applying /Rotate keeps
+    // page content and annotations rotating together, matching the app.
+    if (state.rotation) {
+      for (const page of pages) {
+        const base = page.getRotation().angle || 0;
+        page.setRotation(degrees((base + state.rotation) % 360));
+      }
+    }
 
     for (const [numStr, strokes] of Object.entries(state.annotations)) {
       const num = +numStr;
@@ -767,10 +940,11 @@ function hexToRgb(hex) {
 const ACTIONS = {
   open: openViaDialog,
   toolSelect: () => setTool('select'),
-  toolPen: () => setTool('pen'),
-  toolHighlighter: () => setTool('highlighter'),
-  toolEraser: () => setTool('eraser'),
-  darkMode: toggleDarkMode,
+  toolPen: () => toggleTool('pen'),
+  toolHighlighter: () => toggleTool('highlighter'),
+  toolEraser: () => toggleTool('eraser'),
+  darkMode: toggleTheme,
+  themeMenu: toggleThemeMenu,
   undo,
   redo,
   zoomIn,
@@ -778,17 +952,24 @@ const ACTIONS = {
   fitWidth,
   nextPage: () => goToPage(getCurrentPage() + 1),
   prevPage: () => goToPage(getCurrentPage() - 1),
+  rotateCW: () => rotate(90),
+  rotateCCW: () => rotate(-90),
+  save,
   export: exportPdf,
+  fullscreen: toggleFullscreen,
   settings: openSettings,
   clearPage: clearCurrentPage,
 };
 
 // Toolbar buttons
 document.querySelectorAll('[data-action]').forEach((btn) => {
-  btn.addEventListener('click', () => ACTIONS[btn.dataset.action]?.());
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    ACTIONS[btn.dataset.action]?.();
+  });
 });
 document.querySelectorAll('#tool-group .tool').forEach((btn) => {
-  btn.addEventListener('click', () => setTool(btn.dataset.tool));
+  btn.addEventListener('click', () => toggleTool(btn.dataset.tool));
 });
 
 // ============================================================
@@ -814,10 +995,40 @@ window.addEventListener('keydown', (e) => {
   if (typing) return;
   const combo = comboFromEvent(e);
   if (!combo) return;
-  const action = Object.keys(shortcuts).find((a) => shortcuts[a] === combo);
+
+  if (combo === 'esc' && themeMenu && !themeMenu.hidden) {
+    closeThemeMenu();
+    return;
+  }
+
+  const action = Object.keys(shortcuts).find((a) => shortcuts[a] && shortcuts[a] === combo);
   if (action && ACTIONS[action]) {
     e.preventDefault();
     ACTIONS[action]();
+    return;
+  }
+
+  // Bare arrow keys move/scroll the document — available in every tool,
+  // including the drawing tools where dragging is reserved for the pen.
+  if (['up', 'down', 'left', 'right'].includes(combo)) {
+    e.preventDefault();
+    scrollByArrow(combo);
+  }
+});
+
+function scrollByArrow(dir) {
+  const stepV = Math.max(80, viewer.clientHeight * 0.16);
+  const stepH = 120;
+  if (dir === 'up') viewer.scrollTop -= stepV;
+  else if (dir === 'down') viewer.scrollTop += stepV;
+  else if (dir === 'left') viewer.scrollLeft -= stepH;
+  else if (dir === 'right') viewer.scrollLeft += stepH;
+}
+
+// Close the theme popover when clicking anywhere outside it.
+document.addEventListener('click', (e) => {
+  if (themeMenu && !themeMenu.hidden && !e.target.closest('.theme-wrap')) {
+    closeThemeMenu();
   }
 });
 window.addEventListener('keyup', (e) => {
@@ -958,7 +1169,18 @@ function updateHints() {
 // ============================================================
 setTool('select');
 updateHints();
+
+// Restore the last-used theme (global preference) before any PDF loads.
+const savedTheme = localStorage.getItem('deathpdf.theme') || 'none';
+state.theme = savedTheme;
+if (savedTheme !== 'none') state.lastDark = savedTheme;
+viewer.dataset.theme = savedTheme;
+darkBtn.classList.toggle('on', savedTheme !== 'none');
+renderThemeMenu();
+updateTitle();
+
 window.dpdf.onOpenFilePath(async (p) => {
+  if (!confirmDiscardIfDirty()) return;
   const res = await window.dpdf.readPdf(p);
   if (res) await loadPdf(res);
 });

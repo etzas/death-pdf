@@ -57,7 +57,7 @@
       </label>
     </div>
 
-    <div class="tb-spacer"></div>
+    <div class="tb-divider"></div>
 
     <!-- View controls -->
     <div class="tb-group">
@@ -86,19 +86,40 @@
 
     <div class="tb-divider"></div>
 
+    <!-- Rotation -->
+    <div class="tb-group">
+      <button class="tb-btn" data-action="rotateCCW" title="Girar 90&deg; anti-horario">
+        <svg viewBox="0 0 24 24"><path d="M4 8a8 8 0 1 1-1 6"/><path d="M4 4v4h4"/></svg>
+      </button>
+      <button class="tb-btn" data-action="rotateCW" title="Girar 90&deg; horario">
+        <svg viewBox="0 0 24 24"><path d="M20 8A8 8 0 1 0 21 14"/><path d="M20 4v4h-4"/></svg>
+      </button>
+    </div>
+
+    <div class="tb-spacer"></div>
+
     <div class="tb-group page-group">
       <input type="text" id="page-input" value="0" inputmode="numeric" />
       <span id="page-total">/ 0</span>
     </div>
 
-    <div class="tb-divider"></div>
+    <div class="tb-spacer"></div>
 
     <div class="tb-group">
-      <button class="tb-btn" data-action="darkMode" title="Modo escuro do PDF" id="dark-btn">
-        <svg viewBox="0 0 24 24"><path d="M20 14A8 8 0 1 1 10 4a6 6 0 0 0 10 10z"/></svg>
+      <div class="theme-wrap">
+        <button class="tb-btn" data-action="themeMenu" title="Tema do PDF" id="dark-btn">
+          <svg viewBox="0 0 24 24"><path d="M20 14A8 8 0 1 1 10 4a6 6 0 0 0 10 10z"/></svg>
+        </button>
+        <div id="theme-menu" class="popover" hidden></div>
+      </div>
+      <button class="tb-btn" data-action="save" title="Salvar anotacoes" id="save-btn">
+        <svg viewBox="0 0 24 24"><path d="M5 3h11l3 3v15H5z"/><path d="M8 3v5h7"/><path d="M8 21v-6h8v6"/></svg>
       </button>
       <button class="tb-btn" data-action="export" title="Exportar PDF com anotacoes">
         <svg viewBox="0 0 24 24"><path d="M12 3v12M8 11l4 4 4-4"/><path d="M5 21h14"/></svg>
+      </button>
+      <button class="tb-btn" data-action="fullscreen" title="Tela cheia">
+        <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
       </button>
       <button class="tb-btn" data-action="settings" title="Atalhos e preferencias">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>

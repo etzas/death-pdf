@@ -105,6 +105,48 @@ html, body {
 .tb-btn.tool.active svg { stroke: var(--accent); }
 #dark-btn.on { color: var(--accent); background: var(--accent-soft); }
 #dark-btn.on svg { stroke: var(--accent); fill: var(--accent-soft); }
+/* Unsaved-changes indicator on the save button. */
+#save-btn.dirty { color: var(--accent); }
+#save-btn.dirty::after {
+  content: '';
+  position: absolute;
+  top: 5px; right: 5px;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.tb-btn { position: relative; }
+
+/* Theme popover */
+.theme-wrap { position: relative; display: inline-flex; }
+.popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 176px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 5px;
+  z-index: 80;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.popover-item {
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: var(--ui);
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.popover-item:hover { background: var(--surface-2); }
+.popover-item.active { color: var(--accent); background: var(--accent-soft); }
 
 /* Contextual tool options */
 .tool-options { gap: 10px; padding-left: 4px; }
@@ -155,10 +197,37 @@ input[type='range']::-webkit-slider-thumb {
   scrollbar-width: thin;
   scrollbar-color: var(--line) transparent;
 }
-#viewer::-webkit-scrollbar { width: 12px; height: 12px; }
+#viewer::-webkit-scrollbar { width: 18px; height: 18px; }
+#viewer::-webkit-scrollbar-track { background: var(--surface); }
 #viewer::-webkit-scrollbar-thumb {
-  background: var(--line); border-radius: 6px;
-  border: 3px solid var(--bg);
+  background: #3a3a3a; border-radius: 9px;
+  border: 3px solid var(--surface); min-height: 40px;
+}
+#viewer::-webkit-scrollbar-thumb:hover { background: #4a4a4a; }
+/* Bigger, clearly clickable scroll arrows at the ends of the bar. */
+#viewer::-webkit-scrollbar-button:single-button {
+  background: var(--surface-2);
+  height: 18px; width: 18px;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 10px;
+}
+#viewer::-webkit-scrollbar-button:single-button:hover { background-color: var(--line); }
+/* Up */
+#viewer::-webkit-scrollbar-button:single-button:vertical:decrement {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23bcbcbc'><path d='M12 8l-7 8h14z'/></svg>");
+}
+/* Down */
+#viewer::-webkit-scrollbar-button:single-button:vertical:increment {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23bcbcbc'><path d='M12 16l7-8H5z'/></svg>");
+}
+/* Left */
+#viewer::-webkit-scrollbar-button:single-button:horizontal:decrement {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23bcbcbc'><path d='M8 12l8-7v14z'/></svg>");
+}
+/* Right */
+#viewer::-webkit-scrollbar-button:single-button:horizontal:increment {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23bcbcbc'><path d='M16 12l-8 7V5z'/></svg>");
 }
 
 #pages {
@@ -185,9 +254,23 @@ input[type='range']::-webkit-slider-thumb {
 }
 .page .pdf-layer { position: relative; }
 
-/* Dark mode: invert only the rendered PDF, never the annotations. */
-#viewer.dark .page { background: #0a0a0a; }
-#viewer.dark .page .pdf-layer { filter: invert(1) hue-rotate(180deg); }
+/* PDF themes: apply a filter to the rendered PDF only — annotations,
+   which live on the separate .anno-layer, are never touched. */
+#viewer[data-theme='invert'] .page { background: #0a0a0a; }
+#viewer[data-theme='invert'] .page .pdf-layer { filter: invert(1) hue-rotate(180deg); }
+
+#viewer[data-theme='bw'] .page { background: #000; }
+#viewer[data-theme='bw'] .page .pdf-layer { filter: invert(1) grayscale(1) contrast(1.15); }
+
+#viewer[data-theme='sepia'] .page { background: #100d08; }
+#viewer[data-theme='sepia'] .page .pdf-layer {
+  filter: invert(0.9) hue-rotate(180deg) sepia(0.6) brightness(0.95);
+}
+
+#viewer[data-theme='night'] .page { background: #0d0f12; }
+#viewer[data-theme='night'] .page .pdf-layer {
+  filter: invert(0.92) hue-rotate(180deg) brightness(0.9) contrast(1.05);
+}
 
 /* Cursors per tool */
 #viewer[data-tool='pen'] .page,
@@ -196,6 +279,12 @@ input[type='range']::-webkit-slider-thumb {
 #viewer[data-tool='pan'] { cursor: grab; }
 #viewer[data-tool='pan'].grabbing { cursor: grabbing; }
 #viewer[data-tool='select'] .page { cursor: default; }
+
+/* While a drawing tool is active, stop the browser/tablet from turning a
+   pen drag into a scroll/pan gesture — the stroke must stay on the canvas. */
+#viewer[data-tool='pen'] .page,
+#viewer[data-tool='highlighter'] .page,
+#viewer[data-tool='eraser'] .page { touch-action: none; }
 
 /* ===================== EMPTY STATE ===================== */
 #empty-state {

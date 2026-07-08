@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('dpdf', {
   saveAnnotations: (pdfPath, data) =>
     ipcRenderer.invoke('annotations:save', pdfPath, data),
   exportPdf: (name, bytes) => ipcRenderer.invoke('dialog:exportPdf', name, bytes),
+  toggleFullscreen: () => ipcRenderer.invoke('window:toggleFullscreen'),
+  setDirty: (v) => ipcRenderer.send('state:setDirty', v),
   onOpenFilePath: (cb) =>
     ipcRenderer.on('open-file-path', (_e, p) => cb(p)),
 });

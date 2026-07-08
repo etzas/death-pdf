@@ -12,6 +12,11 @@ if (process.platform === 'linux') {
 
 let mainWindow = null;
 let pendingFile = null; // file to open once the window is ready
+let unsavedChanges = false; // renderer reports when annotations are dirty
+
+ipcMain.on('state:setDirty', (_e, value) => {
+  unsavedChanges = !!value;
+});
 
 function pdfFromArgs(argv) {
   return argv.find((a) => typeof a === 'string' && a.toLowerCase().endsWith('.pdf')) || null;
@@ -75,6 +80,22 @@ function createWindow() {
     });
   }
 
+  // Guard against closing with unsaved annotations. Saving is manual
+  // (Ctrl+S), so warn instead of silently discarding.
+  mainWindow.on('close', (e) => {
+    if (!unsavedChanges) return;
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: 'warning',
+      buttons: ['Descartar e sair', 'Cancelar'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Anotacoes nao salvas',
+      message: 'Ha anotacoes nao salvas. Deseja descarta-las e sair?',
+    });
+    if (choice === 1) e.preventDefault();
+    else unsavedChanges = false;
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -128,6 +149,13 @@ ipcMain.handle('annotations:save', async (_e, pdfPath, data) => {
   } catch (err) {
     return { error: String(err) };
   }
+});
+
+ipcMain.handle('window:toggleFullscreen', () => {
+  if (!mainWindow) return false;
+  const next = !mainWindow.isFullScreen();
+  mainWindow.setFullScreen(next);
+  return next;
 });
 
 ipcMain.handle('dialog:exportPdf', async (_e, suggestedName, bytes) => {
