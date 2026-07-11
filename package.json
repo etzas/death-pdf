@@ -1,6 +1,6 @@
 {
   "name": "death-pdf",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Death PDF - leitor e anotador de PDF minimalista, com modo escuro, caneta sensivel a pressao e atalhos configuraveis.",
   "main": "main.js",
   "author": "Joao Pedro",
