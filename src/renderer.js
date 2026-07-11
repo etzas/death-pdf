@@ -17,6 +17,8 @@ const state = {
   pageDims: [], // {w, h} at scale 1, index by page-1
   scale: 1,
   rotation: 0, // 0 | 90 | 180 | 270, clockwise degrees
+  shove: 'none', // 'none' | 'left' | 'right' — pushes the page column to
+                 // one side to free up scratch margin on the other
   tool: 'select',
   prevTool: 'select',
   theme: 'none', // PDF viewing theme id (see PDF_THEMES)
@@ -47,6 +49,17 @@ const PDF_THEMES = [
   { id: 'night', label: 'Noturno (suave)' },
 ];
 
+// Interface (app chrome) themes. These swap the palette CSS variables via the
+// html[data-ui-theme] attribute (see styles.css). Independent of PDF_THEMES,
+// which only filter the rendered document. `death` is the default palette
+// baked into :root, so it needs no attribute overrides.
+const UI_THEMES = [
+  { id: 'death', label: 'Death (vermelho)' },
+  { id: 'mono', label: 'Preto e branco' },
+  { id: 'light', label: 'Claro' },
+];
+const DEFAULT_UI_THEME = 'death';
+
 // ============================================================
 // Shortcuts
 // ============================================================
@@ -56,6 +69,7 @@ const DEFAULT_SHORTCUTS = {
   toolPen: 'p',
   toolHighlighter: 'h',
   toolEraser: 'e',
+  toolPan: 'g',
   darkMode: 'ctrl+shift+d',
   undo: 'ctrl+z',
   redo: 'ctrl+shift+z',
@@ -66,11 +80,16 @@ const DEFAULT_SHORTCUTS = {
   prevPage: 'pageup',
   rotateCW: 'ctrl+shift+right',
   rotateCCW: 'ctrl+shift+left',
+  shoveLeft: 'alt+left',
+  shoveRight: 'alt+right',
   save: 'ctrl+s',
   export: 'ctrl+e',
   fullscreen: 'f11',
   settings: 'ctrl+,',
   clearPage: 'ctrl+shift+backspace',
+  closeTab: 'ctrl+w',
+  nextTab: 'ctrl+tab',
+  prevTab: 'ctrl+shift+tab',
 };
 
 const ACTION_LABELS = {
@@ -79,6 +98,7 @@ const ACTION_LABELS = {
   toolPen: 'Ferramenta: caneta',
   toolHighlighter: 'Ferramenta: marca-texto',
   toolEraser: 'Ferramenta: borracha',
+  toolPan: 'Ferramenta: mao (arrastar)',
   darkMode: 'Alternar tema escuro do PDF',
   undo: 'Desfazer',
   redo: 'Refazer',
@@ -89,11 +109,16 @@ const ACTION_LABELS = {
   prevPage: 'Pagina anterior',
   rotateCW: 'Girar 90 (horario)',
   rotateCCW: 'Girar 90 (anti-horario)',
+  shoveLeft: 'Empurrar PDF para a esquerda (rascunho)',
+  shoveRight: 'Empurrar PDF para a direita (rascunho)',
   save: 'Salvar anotacoes',
   export: 'Exportar PDF anotado',
   fullscreen: 'Tela cheia',
   settings: 'Abrir preferencias',
   clearPage: 'Limpar anotacoes da pagina',
+  closeTab: 'Fechar aba',
+  nextTab: 'Proxima aba',
+  prevTab: 'Aba anterior',
 };
 
 let shortcuts = loadShortcuts();
@@ -165,8 +190,173 @@ const widthSlider = document.getElementById('width-slider');
 const widthLabel = document.getElementById('width-label');
 const darkBtn = document.getElementById('dark-btn');
 const themeMenu = document.getElementById('theme-menu');
+const uiThemeBtn = document.getElementById('ui-theme-btn');
+const uiThemeMenu = document.getElementById('ui-theme-menu');
+
+// .popover is `position: fixed` (see styles.css) so it's never clipped by
+// #toolbar's overflow — position it against the anchor button's actual
+// on-screen rect each time it opens.
+function positionPopover(popover, anchorBtn) {
+  const r = anchorBtn.getBoundingClientRect();
+  popover.style.top = r.bottom + 6 + 'px';
+  popover.style.right = window.innerWidth - r.right + 'px';
+}
 const saveBtn = document.getElementById('save-btn');
+const shoveLeftBtn = document.getElementById('shove-left-btn');
+const shoveRightBtn = document.getElementById('shove-right-btn');
 const statusEl = document.getElementById('status');
+const tabbarEl = document.getElementById('tabbar');
+const tabsEl = document.getElementById('tabs');
+
+// ============================================================
+// Tabs
+// Each tab holds an independent document: pdf, bytes, annotations,
+// undo/redo, zoom/rotation/theme and scroll position. `state` always
+// mirrors whichever tab is active; switching tabs snapshots the outgoing
+// tab's fields out of `state` and restores the incoming tab's fields into
+// it, so the rest of the app keeps reading/writing plain `state.foo`.
+// ============================================================
+let tabs = [];
+let activeTabId = null;
+let tabIdSeq = 0;
+const TAB_FIELDS = [
+  'pdf', 'pdfBytes', 'pdfPath', 'pdfName', 'numPages', 'pageDims',
+  'scale', 'rotation', 'shove', 'theme', 'lastDark', 'annotations',
+  'undoStack', 'redoStack', 'dirty',
+];
+
+function activeTabRecord() {
+  return tabs.find((t) => t.id === activeTabId) || null;
+}
+function snapshotActiveTab() {
+  const t = activeTabRecord();
+  if (!t) return;
+  for (const k of TAB_FIELDS) t[k] = state[k];
+  t.scrollTop = viewer.scrollTop;
+}
+function restoreStateFrom(tab) {
+  for (const k of TAB_FIELDS) state[k] = tab[k];
+}
+function anyDirty() {
+  return tabs.some((t) => (t.id === activeTabId ? state.dirty : t.dirty));
+}
+function updateActiveTabDot() {
+  const dot = tabsEl.querySelector('.tab-item.active .tab-dot');
+  if (dot) dot.hidden = !state.dirty;
+}
+
+function activateTab(tab) {
+  activeTabId = tab.id;
+  restoreStateFrom(tab);
+  viewer.dataset.theme = state.theme;
+  darkBtn.classList.toggle('on', state.theme !== 'none');
+  renderThemeMenu();
+  zoomLabel.textContent = Math.round(state.scale * 100) + '%';
+  buildPages();
+  updateShoveButtons();
+  renderVisible();
+  viewer.scrollTop = tab.scrollTop || 0;
+  updateCurrentPage();
+  updateTitle();
+}
+
+function switchTab(id) {
+  if (id === activeTabId) return;
+  snapshotActiveTab();
+  const tab = tabs.find((t) => t.id === id);
+  if (tab) activateTab(tab);
+  renderTabBar();
+}
+
+function closeTab(id) {
+  const idx = tabs.findIndex((t) => t.id === id);
+  if (idx === -1) return;
+  const isActive = id === activeTabId;
+  const dirty = isActive ? state.dirty : tabs[idx].dirty;
+  if (dirty) {
+    const name = (isActive ? state.pdfName : tabs[idx].pdfName) || 'documento';
+    const ok = window.confirm(
+      `Ha anotacoes nao salvas em "${name}". Deseja descarta-las e fechar a aba?`
+    );
+    if (!ok) return;
+  }
+  tabs.splice(idx, 1);
+  if (isActive) {
+    const next = tabs[idx] || tabs[idx - 1] || null;
+    if (next) {
+      activateTab(next);
+    } else {
+      activeTabId = null;
+      resetToEmpty();
+    }
+  }
+  renderTabBar();
+}
+
+function cycleTab(dir) {
+  if (tabs.length < 2) return;
+  const idx = tabs.findIndex((t) => t.id === activeTabId);
+  const next = tabs[(idx + dir + tabs.length) % tabs.length];
+  switchTab(next.id);
+}
+
+function resetToEmpty() {
+  if (io) { io.disconnect(); io = null; }
+  pagesEl.innerHTML = '';
+  state.pdf = null;
+  state.pdfBytes = null;
+  state.pdfPath = null;
+  state.pdfName = null;
+  state.numPages = 0;
+  state.pageDims = [];
+  state.scale = 1;
+  state.rotation = 0;
+  state.shove = 'none';
+  state.annotations = {};
+  state.undoStack = [];
+  state.redoStack = [];
+  state.dirty = false;
+  emptyState.classList.remove('hidden');
+  pageTotal.textContent = '/ 0';
+  pageInput.value = '0';
+  updateTitle();
+  positionShoveButtons();
+}
+
+function renderTabBar() {
+  tabbarEl.hidden = tabs.length === 0;
+  tabsEl.innerHTML = '';
+  for (const t of tabs) {
+    const isActive = t.id === activeTabId;
+    const name = (isActive ? state.pdfName : t.pdfName) || 'Sem titulo';
+    const dirty = isActive ? state.dirty : t.dirty;
+
+    const item = document.createElement('div');
+    item.className = 'tab-item' + (isActive ? ' active' : '');
+    item.title = name;
+
+    const dot = document.createElement('span');
+    dot.className = 'tab-dot';
+    dot.hidden = !dirty;
+
+    const label = document.createElement('span');
+    label.className = 'tab-name';
+    label.textContent = name;
+
+    const close = document.createElement('button');
+    close.className = 'tab-close';
+    close.title = 'Fechar aba';
+    close.textContent = '×';
+    close.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeTab(t.id);
+    });
+
+    item.append(dot, label, close);
+    item.addEventListener('click', () => switchTab(t.id));
+    tabsEl.appendChild(item);
+  }
+}
 
 // ============================================================
 // Rotation coordinate mapping
@@ -211,20 +401,31 @@ function toast(msg) {
 // PDF loading
 // ============================================================
 async function openViaDialog() {
-  if (!confirmDiscardIfDirty()) return;
   const res = await window.dpdf.openPdf();
-  if (res) await loadPdf(res);
+  if (!res) return;
+  for (const file of res) await loadPdf(file);
 }
 
-// Ask before throwing away unsaved annotations. Returns true to proceed.
-function confirmDiscardIfDirty() {
-  if (!state.dirty) return true;
-  return window.confirm(
-    'Ha anotacoes nao salvas. Deseja descarta-las e continuar?'
-  );
+// Opens `bytes`/`path`/`name` into a brand-new tab and makes it active.
+// Each PDF gets its own tab, so an open never discards another tab's work.
+// Loads are serialized through a queue: loadPdfImpl mutates the single
+// shared `state` object while it awaits, so two overlapping calls (e.g.
+// two files opened in quick succession) would otherwise interleave writes
+// and corrupt whichever tab's data was mid-load.
+let loadQueue = Promise.resolve();
+function loadPdf(fileInfo) {
+  const run = loadQueue.then(() => loadPdfImpl(fileInfo));
+  loadQueue = run;
+  return run;
 }
 
-async function loadPdf({ bytes, path, name }) {
+async function loadPdfImpl({ bytes, path, name }) {
+  const prevActiveId = activeTabId;
+  snapshotActiveTab();
+  const id = ++tabIdSeq;
+  tabs.push({ id });
+  activeTabId = id;
+
   try {
     const u8 = new Uint8Array(bytes);
     state.pdfBytes = u8.slice(); // keep a pristine copy for export
@@ -248,11 +449,13 @@ async function loadPdf({ bytes, path, name }) {
     state.undoStack = [];
     state.redoStack = [];
     state.rotation = 0;
+    state.shove = 'none';
     state.dirty = false;
     const saved = await window.dpdf.loadAnnotations(path);
     if (saved && saved.annotations) {
       state.annotations = saved.annotations;
       if (typeof saved.rotation === 'number') state.rotation = saved.rotation;
+      if (saved.shove === 'left' || saved.shove === 'right') state.shove = saved.shove;
       // Migrate the legacy `darkMode` boolean to the new theme system.
       if (saved.theme) setTheme(saved.theme);
       else if (saved.darkMode === true) setTheme('invert');
@@ -262,9 +465,20 @@ async function loadPdf({ bytes, path, name }) {
     updateTitle();
 
     fitWidth(); // sets scale and builds pages
+    updateShoveButtons();
+    renderTabBar();
     toast(`${name} — ${state.numPages} paginas`);
   } catch (err) {
     console.error(err);
+    tabs = tabs.filter((t) => t.id !== id);
+    const prevTab = tabs.find((t) => t.id === prevActiveId);
+    if (prevTab) {
+      activateTab(prevTab);
+    } else {
+      activeTabId = null;
+      resetToEmpty();
+    }
+    renderTabBar();
     toast('Nao foi possivel abrir o PDF.');
   }
 }
@@ -283,6 +497,14 @@ function buildPages() {
     const w = dim.w * state.scale;
     const h = dim.h * state.scale;
 
+    const row = document.createElement('div');
+    row.className = 'page-row';
+
+    const scratchL = document.createElement('canvas');
+    scratchL.className = 'scratch-layer scratch-left';
+    const scratchR = document.createElement('canvas');
+    scratchR.className = 'scratch-layer scratch-right';
+
     const pageEl = document.createElement('div');
     pageEl.className = 'page';
     pageEl.dataset.page = String(i);
@@ -292,14 +514,20 @@ function buildPages() {
 
     const pdfCanvas = document.createElement('canvas');
     pdfCanvas.className = 'pdf-layer';
+    const textLayerDiv = document.createElement('div');
+    textLayerDiv.className = 'text-layer';
     const annoCanvas = document.createElement('canvas');
     annoCanvas.className = 'anno-layer';
 
     pageEl.appendChild(pdfCanvas);
+    pageEl.appendChild(textLayerDiv);
     pageEl.appendChild(annoCanvas);
-    pagesEl.appendChild(pageEl);
+    row.appendChild(scratchL);
+    row.appendChild(pageEl);
+    row.appendChild(scratchR);
+    pagesEl.appendChild(row);
 
-    attachDrawingHandlers(pageEl, annoCanvas);
+    setGutterStyle(pageEl);
   }
 
   io = new IntersectionObserver(
@@ -321,6 +549,7 @@ function buildPages() {
   pagesEl.querySelectorAll('.page').forEach((p) => io.observe(p));
   pageTotal.textContent = `/ ${state.numPages}`;
   pageInput.value = '1';
+  positionShoveButtons();
 }
 
 function clearPageCanvas(pageEl) {
@@ -335,6 +564,19 @@ function clearPageCanvas(pageEl) {
     try { pageEl._renderTask.cancel(); } catch {}
     pageEl._renderTask = null;
   }
+  if (pageEl._textLayerTask) {
+    try { pageEl._textLayerTask.cancel(); } catch {}
+    pageEl._textLayerTask = null;
+  }
+  const t = pageEl.querySelector('.text-layer');
+  t.innerHTML = '';
+  t.style.transform = '';
+
+  // Free the scratch-margin canvases too — they're reallocated lazily by
+  // layoutScratchForPage() the next time this page becomes visible.
+  const row = pageEl.parentElement;
+  clearScratchCanvas(row.querySelector('.scratch-left'));
+  clearScratchCanvas(row.querySelector('.scratch-right'));
 }
 
 async function renderPage(pageEl) {
@@ -367,11 +609,65 @@ async function renderPage(pageEl) {
     pageEl.dataset.rendered = 'true';
 
     redrawAnnotations(pageEl);
+    layoutScratchForPage(pageEl);
+    // Not awaited: text isn't needed for the page to count as "rendered",
+    // and it shouldn't block canvas rendering of the next visible page.
+    renderTextLayer(pageEl, page).catch((err) => {
+      if (err && err.name !== 'AbortException') console.error(err);
+    });
   } catch (err) {
     if (err && err.name !== 'RenderingCancelledException') console.error(err);
   } finally {
     pageEl._rendering = false;
   }
+}
+
+// Builds the invisible, selectable text overlay for a page using pdf.js's
+// TextLayer. Text spans are laid out by pdf.js in the page's *unrotated*
+// space (it has no concept of our on-the-fly rotation), so we render at
+// rotation 0 and then apply our own CSS matrix — using the same rotation
+// convention as normToCanvas — to map that box onto the rotated page.
+function rotationTransformCss(rot, w, h) {
+  switch (rot) {
+    case 90: return `matrix(0,1,-1,0,${h},0)`;
+    case 180: return `matrix(-1,0,0,-1,${w},${h})`;
+    case 270: return `matrix(0,-1,1,0,0,${w})`;
+    default: return '';
+  }
+}
+
+async function renderTextLayer(pageEl, page) {
+  const container = pageEl.querySelector('.text-layer');
+  if (pageEl._textLayerTask) {
+    try { pageEl._textLayerTask.cancel(); } catch {}
+    pageEl._textLayerTask = null;
+  }
+  container.innerHTML = '';
+  container.style.transform = '';
+  container.style.setProperty('--scale-factor', state.scale);
+
+  // Text content doesn't depend on scale/rotation — cache it on the page
+  // element so re-renders (zoom, scroll back into view) skip re-extraction.
+  if (!pageEl._textContent) {
+    pageEl._textContent = await page.getTextContent();
+  }
+
+  const unrotatedViewport = page.getViewport({ scale: state.scale, rotation: 0 });
+  const task = new pdfjsLib.TextLayer({
+    textContentSource: pageEl._textContent,
+    container,
+    viewport: unrotatedViewport,
+  });
+  pageEl._textLayerTask = task;
+  await task.render();
+  pageEl._textLayerTask = null;
+
+  container.style.transformOrigin = '0 0';
+  container.style.transform = rotationTransformCss(
+    state.rotation,
+    unrotatedViewport.width,
+    unrotatedViewport.height
+  );
 }
 
 // Re-render everything currently on/near screen (after zoom).
@@ -387,14 +683,6 @@ function renderVisible() {
 // ============================================================
 // Annotation rendering
 // ============================================================
-function annoCtxFor(pageEl) {
-  const c = pageEl.querySelector('.anno-layer');
-  const ctx = c.getContext('2d');
-  const dpr = window.devicePixelRatio || 1;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return ctx;
-}
-
 function pageCssSize(pageEl) {
   return {
     w: parseFloat(pageEl.style.width),
@@ -413,13 +701,14 @@ function redrawAnnotations(pageEl) {
   const dpr = window.devicePixelRatio || 1;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const { w, h } = pageCssSize(pageEl);
-  for (const stroke of strokes) drawStroke(ctx, stroke, w, h);
+  for (const stroke of strokes) drawStroke(ctx, stroke, w, h, state.rotation);
 }
 
-function drawStroke(ctx, stroke, vw, vh) {
+// rot is explicit (not read from state.rotation) so the same function
+// draws scratch-margin strokes too — margins never rotate with the page.
+function drawStroke(ctx, stroke, vw, vh, rot) {
   const pts = stroke.points;
   if (!pts.length) return;
-  const rot = state.rotation;
   const P = (pt) => normToCanvas(pt[0], pt[1], vw, vh, rot);
   ctx.save();
   ctx.lineCap = 'round';
@@ -472,113 +761,385 @@ function pressureScale(stroke, p) {
 }
 
 // ============================================================
-// Drawing input (pen / highlighter / eraser)
+// Scratch margins ("rascunho") + shove layout
+// Each page-row holds a page plus a blank, drawable margin on either
+// side — whatever room is left between the page and the viewer's edges.
+// Their strokes are stored in state.annotations under pseudo page keys
+// 'L<n>'/'R<n>' (n = page number), normalized [0..1] against that
+// margin's own current width/height, exactly like page strokes — so they
+// reuse drawStroke/undo/redo/save unchanged, and simply re-scale when the
+// margin is resized (zoom, window resize, or a "shove").
 // ============================================================
-function attachDrawingHandlers(pageEl, canvas) {
-  let active = null; // current stroke while drawing
-  let erasing = false;
-  let beforeSnapshot = null;
 
-  const relPoint = (clientX, clientY) => {
-    const r = canvas.getBoundingClientRect();
-    const { w, h } = pageCssSize(pageEl);
-    return canvasToNorm(clientX - r.left, clientY - r.top, w, h, state.rotation);
-  };
-
-  canvas.addEventListener('pointerdown', (e) => {
-    if (!['pen', 'highlighter', 'eraser'].includes(state.tool)) return;
-    e.preventDefault();
-    canvas.setPointerCapture(e.pointerId);
-    const num = +pageEl.dataset.page;
-    beforeSnapshot = clone(state.annotations[num] || []);
-
-    if (state.tool === 'eraser') {
-      erasing = true;
-      eraseAt(pageEl, e.clientX, e.clientY);
-      return;
-    }
-
-    const isPen = e.pointerType === 'pen';
-    const [x, y] = relPoint(e.clientX, e.clientY);
-    active = {
-      tool: state.tool,
-      color: state.tool === 'pen' ? state.penColor : state.hlColor,
-      width: state.tool === 'pen' ? state.penWidth : state.hlWidth,
-      pen: isPen,
-      points: [[x, y, isPen ? e.pressure || 0.5 : 0.5]],
-    };
-  });
-
-  canvas.addEventListener('pointermove', (e) => {
-    if (erasing) {
-      eraseAt(pageEl, e.clientX, e.clientY);
-      return;
-    }
-    if (!active) return;
-    e.preventDefault();
-    // Coalesced events give every sample the tablet produced between
-    // frames — this is what makes lines faithful and precise.
-    const events =
-      typeof e.getCoalescedEvents === 'function'
-        ? e.getCoalescedEvents()
-        : [e];
-    const ctx = annoCtxFor(pageEl);
-    const { w, h } = pageCssSize(pageEl);
-    const rot = state.rotation;
-    ctx.save();
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.strokeStyle = active.color;
-    ctx.globalAlpha = active.tool === 'highlighter' ? 0.32 : 1;
-    for (const ev of events.length ? events : [e]) {
-      const [x, y] = relPoint(ev.clientX, ev.clientY);
-      const pr = active.pen ? ev.pressure || 0.5 : 0.5;
-      const prev = active.points[active.points.length - 1];
-      active.points.push([x, y, pr]);
-      if (active.tool === 'highlighter') ctx.lineWidth = active.width;
-      else ctx.lineWidth = active.width * pressureScale(active, (prev[2] + pr) / 2);
-      const [px, py] = normToCanvas(prev[0], prev[1], w, h, rot);
-      const [cx, cy] = normToCanvas(x, y, w, h, rot);
-      ctx.beginPath();
-      ctx.moveTo(px, py);
-      ctx.lineTo(cx, cy);
-      ctx.stroke();
-    }
-    ctx.restore();
-  });
-
-  const finish = (num) => {
-    if (active && active.points.length) {
-      (state.annotations[num] ||= []).push(active);
-      pushUndo(num, beforeSnapshot);
-      redrawAnnotations(pageEl); // clean composited redraw (fixes highlighter overlap)
-      markDirty();
-    } else if (erasing) {
-      pushUndo(num, beforeSnapshot);
-      markDirty();
-    }
-    active = null;
-    erasing = false;
-    beforeSnapshot = null;
-  };
-
-  canvas.addEventListener('pointerup', () => finish(+pageEl.dataset.page));
-  canvas.addEventListener('pointercancel', () => finish(+pageEl.dataset.page));
+// How the leftover width beside a page (at its current CSS size) splits
+// between its two margins, given the current shove state.
+function gutterWidths(pageWpx) {
+  const avail = Math.max(0, viewer.clientWidth - pageWpx);
+  if (state.shove === 'left') return { left: 0, right: avail };
+  if (state.shove === 'right') return { left: avail, right: 0 };
+  return { left: avail / 2, right: avail / 2 };
 }
 
-function eraseAt(pageEl, clientX, clientY) {
-  const num = +pageEl.dataset.page;
-  const strokes = state.annotations[num];
+// Cheap: just sets the CSS box size for a page's two margins, so the row
+// looks right immediately — even for pages whose margins have no pixel
+// buffer allocated yet (see layoutScratchForPage).
+function setGutterStyle(pageEl) {
+  const row = pageEl.parentElement;
+  const scratchL = row.querySelector('.scratch-left');
+  const scratchR = row.querySelector('.scratch-right');
+  const pageW = parseFloat(pageEl.style.width) || 0;
+  const pageH = parseFloat(pageEl.style.height) || 0;
+  const { left, right } = gutterWidths(pageW);
+  scratchL.style.width = left + 'px';
+  scratchL.style.height = pageH + 'px';
+  scratchR.style.width = right + 'px';
+  scratchR.style.height = pageH + 'px';
+}
+
+// Full: (re)allocates the pixel buffer for a *rendered* page's margins
+// and redraws their strokes. Mirrors renderPage/clearPageCanvas's lazy
+// lifecycle for the pdf/anno layers — an off-screen page's margins stay
+// deallocated until it scrolls back into view.
+function layoutScratchForPage(pageEl) {
+  setGutterStyle(pageEl);
+  const row = pageEl.parentElement;
+  const num = pageEl.dataset.page;
+  syncScratchCanvas(row.querySelector('.scratch-left'), 'L' + num);
+  syncScratchCanvas(row.querySelector('.scratch-right'), 'R' + num);
+}
+
+function syncScratchCanvas(canvas, key) {
+  const wCss = parseFloat(canvas.style.width) || 0;
+  const hCss = parseFloat(canvas.style.height) || 0;
+  if (wCss < 1 || hCss < 1) {
+    clearScratchCanvas(canvas);
+    return;
+  }
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.round(wCss * dpr));
+  canvas.height = Math.max(1, Math.round(hCss * dpr));
+  redrawScratch(canvas, key);
+}
+
+function clearScratchCanvas(canvas) {
+  if (!canvas) return;
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
+function redrawScratch(canvas, key) {
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const strokes = state.annotations[key];
   if (!strokes || !strokes.length) return;
-  const canvas = pageEl.querySelector('.anno-layer');
-  const r = canvas.getBoundingClientRect();
-  const { w, h } = pageCssSize(pageEl);
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const w = parseFloat(canvas.style.width) || 0;
+  const h = parseFloat(canvas.style.height) || 0;
+  for (const s of strokes) drawStroke(ctx, s, w, h, 0); // margins never rotate
+}
+
+// Re-applies gutters/pixel buffers to every currently-rendered page (e.g.
+// after a shove toggle or a window resize) — not-yet-rendered pages just
+// get the cheap style update and pick up the rest when they scroll into view.
+function relayoutScratchAll() {
+  pagesEl.querySelectorAll('.page').forEach((pageEl) => {
+    if (pageEl.dataset.rendered === 'true') layoutScratchForPage(pageEl);
+    else setGutterStyle(pageEl);
+  });
+}
+
+function toggleShove(side) {
+  if (!state.pdf) return;
+  state.shove = state.shove === side ? 'none' : side;
+  updateShoveButtons();
+  relayoutScratchAll();
+  markDirty();
+}
+
+function updateShoveButtons() {
+  if (!shoveLeftBtn) return;
+  // Buttons are inverted from their screen position on purpose: the
+  // left-edge button pushes the page right, the right-edge button pushes
+  // it left — so each highlights when ITS action, not its side, is active.
+  shoveLeftBtn.classList.toggle('active', state.shove === 'right');
+  shoveRightBtn.classList.toggle('active', state.shove === 'left');
+}
+
+// Fixed-position buttons anchored to the viewer's on-screen rect — same
+// approach as positionPopover(), so they track window resizes/fullscreen
+// without scrolling with the document.
+function positionShoveButtons() {
+  if (!shoveLeftBtn) return;
+  const has = !!state.pdf;
+  shoveLeftBtn.hidden = !has;
+  shoveRightBtn.hidden = !has;
+  if (!has) return;
+  const r = viewer.getBoundingClientRect();
+  const top = r.top + r.height / 2 + 'px';
+  shoveLeftBtn.style.top = top;
+  shoveRightBtn.style.top = top;
+  shoveLeftBtn.style.left = r.left + 6 + 'px';
+  shoveRightBtn.style.right = window.innerWidth - r.right + 6 + 'px';
+}
+
+// ============================================================
+// Drawing input (pen / highlighter / eraser)
+// Handlers are delegated once on #pages (not per canvas) so a single
+// continuous drag can span multiple "surfaces": pages stacked
+// vertically, and — since scratch margins exist beside every page — the
+// blank space to either side of one. When the pointer crosses a seam
+// (page-to-page, or page-to-margin), the stroke is split into two
+// pieces, each ending/starting exactly at the shared boundary, so the
+// line reads as unbroken even though each piece is stored against its
+// own surface: a page number, or 'L'/'R' + page number for its margins.
+// ============================================================
+let activeDraw = null; // { tool, color, width, pen, bySurface, lastSurface, lastX, lastY }
+let erasingState = null; // { touched: Map<key, beforeStrokes> }
+
+// Finds whichever drawable surface (a page, or one of its two side
+// margins) the given viewport point falls on. Returns null if the point
+// isn't over any surface (e.g. a margin with no room at this zoom/shove).
+function surfaceAt(clientX, clientY) {
+  const rows = pagesEl.querySelectorAll('.page-row');
+  let row = null;
+  for (const r of rows) {
+    if (clientY < r.getBoundingClientRect().bottom) { row = r; break; }
+  }
+  if (!row) row = rows[rows.length - 1] || null;
+  if (!row) return null;
+
+  const pageEl = row.querySelector('.page');
+  const num = pageEl.dataset.page;
+  const pr = pageEl.getBoundingClientRect();
+
+  if (clientX < pr.left || clientX > pr.right) {
+    const onLeft = clientX < pr.left;
+    const canvas = row.querySelector(onLeft ? '.scratch-left' : '.scratch-right');
+    const w = parseFloat(canvas.style.width) || 0;
+    const h = parseFloat(canvas.style.height) || 0;
+    if (w < 2 || h < 2) return null;
+    return { type: 'scratch', canvas, pageEl, key: (onLeft ? 'L' : 'R') + num, w, h, rot: 0 };
+  }
+  return {
+    type: 'page',
+    canvas: pageEl.querySelector('.anno-layer'),
+    pageEl,
+    key: +num,
+    w: parseFloat(pageEl.style.width),
+    h: parseFloat(pageEl.style.height),
+    rot: state.rotation,
+  };
+}
+
+function normPointOnSurface(surface, clientX, clientY) {
+  const r = surface.canvas.getBoundingClientRect();
+  return canvasToNorm(clientX - r.left, clientY - r.top, surface.w, surface.h, surface.rot);
+}
+
+function surfaceCtxFor(surface) {
+  const ctx = surface.canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return ctx;
+}
+
+function redrawSurface(surface) {
+  if (surface.type === 'page') redrawAnnotations(surface.pageEl);
+  else redrawScratch(surface.canvas, surface.key);
+}
+
+// Lazily starts (and snapshots the "before" state for) this surface's
+// piece of the in-progress multi-surface stroke.
+function surfaceStrokeEntry(draw, surface) {
+  let entry = draw.bySurface.get(surface.canvas);
+  if (!entry) {
+    entry = {
+      before: clone(state.annotations[surface.key] || []),
+      stroke: { tool: draw.tool, color: draw.color, width: draw.width, pen: draw.pen, points: [] },
+      surface,
+    };
+    draw.bySurface.set(surface.canvas, entry);
+  }
+  return entry;
+}
+
+function drawSegmentLive(surface, draw, fromPt, toPt) {
+  const ctx = surfaceCtxFor(surface);
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = draw.color;
+  ctx.globalAlpha = draw.tool === 'highlighter' ? 0.32 : 1;
+  ctx.lineWidth = draw.tool === 'highlighter'
+    ? draw.width
+    : draw.width * pressureScale(draw, (fromPt[2] + toPt[2]) / 2);
+  const [px, py] = normToCanvas(fromPt[0], fromPt[1], surface.w, surface.h, surface.rot);
+  const [cx, cy] = normToCanvas(toPt[0], toPt[1], surface.w, surface.h, surface.rot);
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  ctx.lineTo(cx, cy);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function onDrawPointerDown(e) {
+  if (!['pen', 'highlighter', 'eraser'].includes(state.tool)) return;
+  const surface = surfaceAt(e.clientX, e.clientY);
+  if (!surface) return;
+  e.preventDefault();
+  pagesEl.setPointerCapture(e.pointerId);
+
+  if (state.tool === 'eraser') {
+    erasingState = { touched: new Map() };
+    eraseAtSurface(surface, e.clientX, e.clientY, erasingState);
+    return;
+  }
+
+  const isPen = e.pointerType === 'pen';
+  activeDraw = {
+    tool: state.tool,
+    color: state.tool === 'pen' ? state.penColor : state.hlColor,
+    width: state.tool === 'pen' ? state.penWidth : state.hlWidth,
+    pen: isPen,
+    bySurface: new Map(),
+    lastSurface: surface,
+    lastX: e.clientX,
+    lastY: e.clientY,
+  };
+  const entry = surfaceStrokeEntry(activeDraw, surface);
+  const [x, y] = normPointOnSurface(surface, e.clientX, e.clientY);
+  entry.stroke.points.push([x, y, isPen ? e.pressure || 0.5 : 0.5]);
+}
+
+function onDrawPointerMove(e) {
+  if (erasingState) {
+    const surface = surfaceAt(e.clientX, e.clientY);
+    if (surface) eraseAtSurface(surface, e.clientX, e.clientY, erasingState);
+    return;
+  }
+  if (!activeDraw) return;
+  e.preventDefault();
+  const draw = activeDraw;
+  // Coalesced events give every sample the tablet produced between
+  // frames — this is what makes lines faithful and precise.
+  const events = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [e];
+
+  for (const ev of events.length ? events : [e]) {
+    const pr = draw.pen ? ev.pressure || 0.5 : 0.5;
+    const surface = surfaceAt(ev.clientX, ev.clientY);
+    if (!surface) { draw.lastX = ev.clientX; draw.lastY = ev.clientY; continue; }
+
+    if (surface.canvas === draw.lastSurface.canvas) {
+      const entry = surfaceStrokeEntry(draw, surface);
+      const prev = entry.stroke.points[entry.stroke.points.length - 1];
+      const [x, y] = normPointOnSurface(surface, ev.clientX, ev.clientY);
+      const cur = [x, y, pr];
+      entry.stroke.points.push(cur);
+      drawSegmentLive(surface, draw, prev, cur);
+    } else {
+      // Crossed into a different surface: another page (scrolled past a
+      // page seam), or into/out of a side margin (drawn past the page's
+      // own edge). Each surface is its own canvas, so the line can only
+      // ever be drawn up to that canvas's own edge. Stop the old
+      // surface's piece exactly at the shared boundary and start the new
+      // one there too, so the only visible break is that fixed seam.
+      const oldSurface = draw.lastSurface;
+      const newSurface = surface;
+      const oldR = oldSurface.canvas.getBoundingClientRect();
+      const newR = newSurface.canvas.getBoundingClientRect();
+      const dx = ev.clientX - draw.lastX;
+      const dy = ev.clientY - draw.lastY;
+
+      // Pages stack vertically (row to row); a page and its own margins
+      // sit side by side within the same row. Figure out which axis
+      // separates the two surfaces so the seam is cut on the right edge.
+      const stackedVertically = oldR.bottom <= newR.top || oldR.top >= newR.bottom;
+      let seamOldX, seamOldY, seamNewX, seamNewY;
+      if (stackedVertically) {
+        const movingDown = oldR.bottom <= newR.top;
+        const oldEdge = movingDown ? oldR.bottom : oldR.top;
+        const newEdge = movingDown ? newR.top : newR.bottom;
+        const t1 = dy !== 0 ? (oldEdge - draw.lastY) / dy : 0.5;
+        const t2 = dy !== 0 ? (newEdge - draw.lastY) / dy : 0.5;
+        seamOldX = draw.lastX + t1 * dx; seamOldY = oldEdge;
+        seamNewX = draw.lastX + t2 * dx; seamNewY = newEdge;
+      } else {
+        const movingRight = oldR.right <= newR.left;
+        const oldEdge = movingRight ? oldR.right : oldR.left;
+        const newEdge = movingRight ? newR.left : newR.right;
+        const t1 = dx !== 0 ? (oldEdge - draw.lastX) / dx : 0.5;
+        const t2 = dx !== 0 ? (newEdge - draw.lastX) / dx : 0.5;
+        seamOldY = draw.lastY + t1 * dy; seamOldX = oldEdge;
+        seamNewY = draw.lastY + t2 * dy; seamNewX = newEdge;
+      }
+
+      const oldEntry = surfaceStrokeEntry(draw, oldSurface);
+      const prevOld = oldEntry.stroke.points[oldEntry.stroke.points.length - 1];
+      const seamOld = [...normPointOnSurface(oldSurface, seamOldX, seamOldY), pr];
+      oldEntry.stroke.points.push(seamOld);
+      drawSegmentLive(oldSurface, draw, prevOld, seamOld);
+
+      const newEntry = surfaceStrokeEntry(draw, newSurface);
+      const seamNew = [...normPointOnSurface(newSurface, seamNewX, seamNewY), pr];
+      newEntry.stroke.points.push(seamNew);
+      const cur = [...normPointOnSurface(newSurface, ev.clientX, ev.clientY), pr];
+      newEntry.stroke.points.push(cur);
+      drawSegmentLive(newSurface, draw, seamNew, cur);
+
+      draw.lastSurface = newSurface;
+    }
+    draw.lastX = ev.clientX;
+    draw.lastY = ev.clientY;
+  }
+}
+
+function onDrawPointerUp() {
+  if (activeDraw) {
+    const entries = [];
+    for (const [, entry] of activeDraw.bySurface) {
+      if (!entry.stroke.points.length) continue;
+      const key = entry.surface.key;
+      (state.annotations[key] ||= []).push(entry.stroke);
+      entries.push({ pageNum: key, strokes: entry.before });
+      redrawSurface(entry.surface); // clean composited redraw (fixes highlighter overlap)
+    }
+    if (entries.length) {
+      pushUndo(entries);
+      markDirty();
+    }
+    activeDraw = null;
+  }
+  if (erasingState) {
+    const entries = [];
+    for (const [key, before] of erasingState.touched) entries.push({ pageNum: key, strokes: before });
+    if (entries.length) {
+      pushUndo(entries);
+      markDirty();
+    }
+    erasingState = null;
+  }
+}
+
+function initDrawingInput() {
+  pagesEl.addEventListener('pointerdown', onDrawPointerDown);
+  pagesEl.addEventListener('pointermove', onDrawPointerMove);
+  pagesEl.addEventListener('pointerup', onDrawPointerUp);
+  pagesEl.addEventListener('pointercancel', onDrawPointerUp);
+}
+
+function eraseAtSurface(surface, clientX, clientY, erasing) {
+  const key = surface.key;
+  const strokes = state.annotations[key];
+  if (!strokes || !strokes.length) return;
+  const r = surface.canvas.getBoundingClientRect();
   const ex = clientX - r.left;
   const ey = clientY - r.top;
   const rad = state.eraserWidth / 2;
-  const rot = state.rotation;
+  const { w, h, rot } = surface;
   const before = strokes.length;
-  state.annotations[num] = strokes.filter((s) => {
+  const filtered = strokes.filter((s) => {
     return !s.points.some((pt) => {
       const [cx, cy] = normToCanvas(pt[0], pt[1], w, h, rot);
       const dx = cx - ex;
@@ -586,8 +1147,10 @@ function eraseAt(pageEl, clientX, clientY) {
       return dx * dx + dy * dy <= rad * rad;
     });
   });
-  if (state.annotations[num].length !== before) {
-    redrawAnnotations(pageEl);
+  if (filtered.length !== before) {
+    if (!erasing.touched.has(key)) erasing.touched.set(key, clone(strokes));
+    state.annotations[key] = filtered;
+    redrawSurface(surface);
     markDirty();
   }
 }
@@ -598,42 +1161,64 @@ function eraseAt(pageEl, clientX, clientY) {
 function clone(x) {
   return JSON.parse(JSON.stringify(x));
 }
-function pushUndo(pageNum, beforeStrokes) {
-  state.undoStack.push({ pageNum, strokes: beforeStrokes });
+// Each undo/redo entry is an array of { pageNum, strokes } — usually one
+// page, but a stroke that crosses a page boundary touches two, and both
+// must undo/redo together as a single atomic operation.
+function pushUndo(entries) {
+  if (!entries || !entries.length) return;
+  state.undoStack.push(entries);
   if (state.undoStack.length > MAX_UNDO) state.undoStack.shift();
   state.redoStack = [];
 }
 function undo() {
-  const op = state.undoStack.pop();
-  if (!op) return;
-  state.redoStack.push({
-    pageNum: op.pageNum,
-    strokes: clone(state.annotations[op.pageNum] || []),
-  });
-  state.annotations[op.pageNum] = clone(op.strokes);
-  redrawPage(op.pageNum);
+  const entries = state.undoStack.pop();
+  if (!entries) return;
+  const redoEntries = entries.map(({ pageNum }) => ({
+    pageNum,
+    strokes: clone(state.annotations[pageNum] || []),
+  }));
+  for (const { pageNum, strokes } of entries) {
+    state.annotations[pageNum] = clone(strokes);
+    redrawPage(pageNum);
+  }
+  state.redoStack.push(redoEntries);
   markDirty();
 }
 function redo() {
-  const op = state.redoStack.pop();
-  if (!op) return;
-  state.undoStack.push({
-    pageNum: op.pageNum,
-    strokes: clone(state.annotations[op.pageNum] || []),
-  });
-  state.annotations[op.pageNum] = clone(op.strokes);
-  redrawPage(op.pageNum);
+  const entries = state.redoStack.pop();
+  if (!entries) return;
+  const undoEntries = entries.map(({ pageNum }) => ({
+    pageNum,
+    strokes: clone(state.annotations[pageNum] || []),
+  }));
+  for (const { pageNum, strokes } of entries) {
+    state.annotations[pageNum] = clone(strokes);
+    redrawPage(pageNum);
+  }
+  state.undoStack.push(undoEntries);
   markDirty();
 }
-function redrawPage(num) {
-  const el = pagesEl.querySelector(`.page[data-page="${num}"]`);
+// `key` is either a page number or a scratch-margin pseudo-key
+// ('L<n>'/'R<n>') — see the "Scratch margins" section above.
+function redrawPage(key) {
+  if (typeof key === 'string') {
+    const side = key[0]; // 'L' or 'R'
+    const num = key.slice(1);
+    const pageEl = pagesEl.querySelector(`.page[data-page="${num}"]`);
+    if (!pageEl || pageEl.dataset.rendered !== 'true') return;
+    const row = pageEl.parentElement;
+    const canvas = row.querySelector(side === 'L' ? '.scratch-left' : '.scratch-right');
+    if (canvas && canvas.width > 0 && canvas.height > 0) redrawScratch(canvas, key);
+    return;
+  }
+  const el = pagesEl.querySelector(`.page[data-page="${key}"]`);
   if (el && el.dataset.rendered === 'true') redrawAnnotations(el);
 }
 function clearCurrentPage() {
   const num = getCurrentPage();
   const before = clone(state.annotations[num] || []);
   if (!before.length) return;
-  pushUndo(num, before);
+  pushUndo([{ pageNum: num, strokes: before }]);
   state.annotations[num] = [];
   redrawPage(num);
   markDirty();
@@ -654,7 +1239,8 @@ function updateTitle() {
   const name = state.pdfName ? `${state.pdfName} — ` : '';
   document.title = `${dot}${name}Death PDF`;
   if (saveBtn) saveBtn.classList.toggle('dirty', state.dirty);
-  window.dpdf.setDirty?.(state.dirty);
+  updateActiveTabDot();
+  window.dpdf.setDirty?.(anyDirty());
 }
 
 async function save() {
@@ -666,6 +1252,7 @@ async function save() {
     version: 1,
     theme: state.theme,
     rotation: state.rotation,
+    shove: state.shove,
     annotations: state.annotations,
   });
   if (res === true) {
@@ -694,6 +1281,7 @@ function setScale(newScale, anchor = true) {
     pageEl.style.width = dim.w * newScale + 'px';
     pageEl.style.height = dim.h * newScale + 'px';
     clearPageCanvas(pageEl);
+    setGutterStyle(pageEl);
   });
 
   if (anchor && prevScale) {
@@ -769,7 +1357,9 @@ function renderThemeMenu() {
 }
 function toggleThemeMenu() {
   if (themeMenu.hidden) {
+    closeUiThemeMenu();
     renderThemeMenu();
+    positionPopover(themeMenu, darkBtn);
     themeMenu.hidden = false;
   } else {
     closeThemeMenu();
@@ -777,6 +1367,45 @@ function toggleThemeMenu() {
 }
 function closeThemeMenu() {
   if (themeMenu) themeMenu.hidden = true;
+}
+
+// ============================================================
+// Interface (app chrome) theme
+// ============================================================
+function setUiTheme(id) {
+  if (!UI_THEMES.some((t) => t.id === id)) id = DEFAULT_UI_THEME;
+  document.documentElement.dataset.uiTheme = id;
+  localStorage.setItem('deathpdf.uiTheme', id);
+  renderUiThemeMenu();
+}
+
+function renderUiThemeMenu() {
+  if (!uiThemeMenu) return;
+  const current = document.documentElement.dataset.uiTheme || DEFAULT_UI_THEME;
+  uiThemeMenu.innerHTML = '';
+  for (const t of UI_THEMES) {
+    const b = document.createElement('button');
+    b.className = 'popover-item' + (t.id === current ? ' active' : '');
+    b.textContent = t.label;
+    b.addEventListener('click', () => {
+      setUiTheme(t.id);
+      closeUiThemeMenu();
+    });
+    uiThemeMenu.appendChild(b);
+  }
+}
+function toggleUiThemeMenu() {
+  if (uiThemeMenu.hidden) {
+    closeThemeMenu();
+    renderUiThemeMenu();
+    positionPopover(uiThemeMenu, uiThemeBtn);
+    uiThemeMenu.hidden = false;
+  } else {
+    closeUiThemeMenu();
+  }
+}
+function closeUiThemeMenu() {
+  if (uiThemeMenu) uiThemeMenu.hidden = true;
 }
 
 // ============================================================
@@ -943,8 +1572,10 @@ const ACTIONS = {
   toolPen: () => toggleTool('pen'),
   toolHighlighter: () => toggleTool('highlighter'),
   toolEraser: () => toggleTool('eraser'),
+  toolPan: () => toggleTool('pan'),
   darkMode: toggleTheme,
   themeMenu: toggleThemeMenu,
+  uiThemeMenu: toggleUiThemeMenu,
   undo,
   redo,
   zoomIn,
@@ -954,11 +1585,16 @@ const ACTIONS = {
   prevPage: () => goToPage(getCurrentPage() - 1),
   rotateCW: () => rotate(90),
   rotateCCW: () => rotate(-90),
+  shoveLeft: () => toggleShove('left'),
+  shoveRight: () => toggleShove('right'),
   save,
   export: exportPdf,
   fullscreen: toggleFullscreen,
   settings: openSettings,
   clearPage: clearCurrentPage,
+  closeTab: () => { if (activeTabId != null) closeTab(activeTabId); },
+  nextTab: () => cycleTab(1),
+  prevTab: () => cycleTab(-1),
 };
 
 // Toolbar buttons
@@ -996,8 +1632,9 @@ window.addEventListener('keydown', (e) => {
   const combo = comboFromEvent(e);
   if (!combo) return;
 
-  if (combo === 'esc' && themeMenu && !themeMenu.hidden) {
+  if (combo === 'esc' && ((themeMenu && !themeMenu.hidden) || (uiThemeMenu && !uiThemeMenu.hidden))) {
     closeThemeMenu();
+    closeUiThemeMenu();
     return;
   }
 
@@ -1025,10 +1662,11 @@ function scrollByArrow(dir) {
   else if (dir === 'right') viewer.scrollLeft += stepH;
 }
 
-// Close the theme popover when clicking anywhere outside it.
+// Close the theme popovers when clicking anywhere outside them.
 document.addEventListener('click', (e) => {
-  if (themeMenu && !themeMenu.hidden && !e.target.closest('.theme-wrap')) {
+  if (!e.target.closest('.theme-wrap')) {
     closeThemeMenu();
+    closeUiThemeMenu();
   }
 });
 window.addEventListener('keyup', (e) => {
@@ -1078,7 +1716,12 @@ pageInput.addEventListener('keydown', (e) => {
 
 window.addEventListener('resize', () => {
   clearTimeout(window._rz);
-  window._rz = setTimeout(() => state.pdf && renderVisible(), 200);
+  window._rz = setTimeout(() => {
+    positionShoveButtons();
+    if (!state.pdf) return;
+    relayoutScratchAll(); // margin widths depend on viewer.clientWidth
+    renderVisible();
+  }, 200);
 });
 
 // ============================================================
@@ -1167,8 +1810,12 @@ function updateHints() {
 // ============================================================
 // Boot
 // ============================================================
+initDrawingInput();
 setTool('select');
 updateHints();
+
+// Restore the last-used interface theme (global preference).
+setUiTheme(localStorage.getItem('deathpdf.uiTheme') || DEFAULT_UI_THEME);
 
 // Restore the last-used theme (global preference) before any PDF loads.
 const savedTheme = localStorage.getItem('deathpdf.theme') || 'none';
@@ -1180,7 +1827,6 @@ renderThemeMenu();
 updateTitle();
 
 window.dpdf.onOpenFilePath(async (p) => {
-  if (!confirmDiscardIfDirty()) return;
   const res = await window.dpdf.readPdf(p);
   if (res) await loadPdf(res);
 });

@@ -7,10 +7,49 @@
   --muted: #7d7d7d;
   --accent: #c8102e;
   --accent-soft: rgba(200, 16, 46, 0.16);
+  --scroll-thumb: #3a3a3a;
+  --scroll-thumb-hover: #4a4a4a;
+  --page-shadow: 0 4px 24px rgba(0, 0, 0, 0.7);
   --radius: 8px;
   --toolbar-h: 52px;
   --ui: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --display: 'UnifrakturCook', 'Iosevka', Georgia, serif;
+}
+
+/* ===================== INTERFACE THEMES ===================== */
+/* The default (:root, above) is the "death" theme: black + red accent.
+   These override the palette variables per interface theme, chosen via
+   the html[data-ui-theme] attribute. Only the app chrome changes — PDF
+   rendering (and its own data-theme filters) is unaffected. */
+
+/* Totalmente preto e branco: no red anywhere, accent becomes white. */
+:root[data-ui-theme='mono'] {
+  --bg: #000000;
+  --surface: #0a0a0a;
+  --surface-2: #1a1a1a;
+  --line: #2e2e2e;
+  --text: #ffffff;
+  --muted: #8a8a8a;
+  --accent: #ffffff;
+  --accent-soft: rgba(255, 255, 255, 0.14);
+  --scroll-thumb: #3a3a3a;
+  --scroll-thumb-hover: #545454;
+  --page-shadow: 0 4px 24px rgba(0, 0, 0, 0.85);
+}
+
+/* Interface clara. */
+:root[data-ui-theme='light'] {
+  --bg: #f4f4f5;
+  --surface: #ffffff;
+  --surface-2: #ececee;
+  --line: #d6d6da;
+  --text: #18181b;
+  --muted: #6b6b72;
+  --accent: #c8102e;
+  --accent-soft: rgba(200, 16, 46, 0.12);
+  --scroll-thumb: #b8b8be;
+  --scroll-thumb-hover: #9a9aa2;
+  --page-shadow: 0 2px 16px rgba(0, 0, 0, 0.18);
 }
 
 * { box-sizing: border-box; }
@@ -18,9 +57,12 @@
 /* The `hidden` attribute must always win, even over id/class display rules. */
 [hidden] { display: none !important; }
 
-html, body {
+html { height: 100%; }
+body {
   margin: 0;
   height: 100%;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   color: var(--text);
   font-family: var(--ui);
@@ -32,6 +74,7 @@ html, body {
 /* ===================== TOOLBAR ===================== */
 #toolbar {
   height: var(--toolbar-h);
+  flex: none;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -42,6 +85,126 @@ html, body {
   scrollbar-width: none;
 }
 #toolbar::-webkit-scrollbar { display: none; }
+
+/* ===================== TAB BAR (estilo Chrome) ===================== */
+/* Sits above #toolbar as the window's "frame" strip (var(--bg)). The
+   active tab's background matches #toolbar's (var(--surface)) and the two
+   sit flush with no border between them, so the active tab visually
+   fuses into the toolbar below — same trick Chrome uses to make the
+   active tab look like the top edge of the page content. */
+#tabbar {
+  flex: none;
+  height: 40px;
+  display: flex;
+  align-items: flex-end;
+  gap: 0;
+  padding: 8px 6px 0;
+  background: var(--bg);
+}
+#tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+#tabs::-webkit-scrollbar { display: none; }
+
+.tab-item {
+  position: relative;
+  flex: 1 1 200px;
+  min-width: 108px;
+  max-width: 240px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 6px 0 12px;
+  border-radius: 9px 9px 0 0;
+  color: var(--muted);
+  cursor: pointer;
+  background: transparent;
+  transition: background 0.12s, color 0.12s;
+}
+.tab-item:hover { background: var(--surface-2); color: var(--text); }
+.tab-item.active {
+  height: 32px;
+  background: var(--surface);
+  color: var(--text);
+  z-index: 2;
+}
+
+/* Thin separators between neighboring inactive tabs, same as Chrome —
+   hidden whenever either side of the seam is active/hovered so the
+   divider never cuts across a highlighted tab. */
+.tab-item + .tab-item::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 24%;
+  bottom: 24%;
+  width: 1px;
+  background: var(--line);
+}
+.tab-item:hover::before,
+.tab-item.active::before,
+.tab-item:hover + .tab-item::before,
+.tab-item.active + .tab-item::before {
+  background: transparent;
+}
+
+.tab-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.tab-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Close button behaves like Chrome's: invisible until the tab is hovered
+   or active, so idle tabs show only the dirty-dot and name. */
+.tab-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  border-radius: 50%;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s, background 0.1s, color 0.1s;
+}
+.tab-item:hover .tab-close,
+.tab-item.active .tab-close {
+  opacity: 1;
+  pointer-events: auto;
+}
+.tab-close:hover { background: var(--line); color: var(--text); }
+
+#tab-add-btn {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  margin-left: 4px;
+  border-radius: 50%;
+}
 
 .tb-group { display: flex; align-items: center; gap: 2px; }
 .tb-spacer { flex: 1 1 auto; }
@@ -117,12 +280,12 @@ html, body {
 }
 .tb-btn { position: relative; }
 
-/* Theme popover */
+/* Theme popover. Positioned via JS (fixed, not absolute) so it is never
+   clipped by #toolbar's forced overflow-y (a side effect of overflow-x:
+   auto — see positionPopover() in renderer.js). */
 .theme-wrap { position: relative; display: inline-flex; }
 .popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
+  position: fixed;
   min-width: 176px;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -191,26 +354,27 @@ input[type='range']::-webkit-slider-thumb {
 /* ===================== VIEWER ===================== */
 #viewer {
   position: relative;
-  height: calc(100% - var(--toolbar-h));
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   background: var(--bg);
   scrollbar-width: thin;
   scrollbar-color: var(--line) transparent;
 }
-#viewer::-webkit-scrollbar { width: 18px; height: 18px; }
+#viewer::-webkit-scrollbar { width: 38px; height: 38px; }
 #viewer::-webkit-scrollbar-track { background: var(--surface); }
 #viewer::-webkit-scrollbar-thumb {
-  background: #3a3a3a; border-radius: 9px;
-  border: 3px solid var(--surface); min-height: 40px;
+  background: var(--scroll-thumb); border-radius: 19px;
+  border: 5px solid var(--surface); min-height: 40px;
 }
-#viewer::-webkit-scrollbar-thumb:hover { background: #4a4a4a; }
+#viewer::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
 /* Bigger, clearly clickable scroll arrows at the ends of the bar. */
 #viewer::-webkit-scrollbar-button:single-button {
   background: var(--surface-2);
-  height: 18px; width: 18px;
+  height: 38px; width: 38px;
   background-repeat: no-repeat;
   background-position: center;
-  background-size: 10px;
+  background-size: 26px;
 }
 #viewer::-webkit-scrollbar-button:single-button:hover { background-color: var(--line); }
 /* Up */
@@ -229,20 +393,63 @@ input[type='range']::-webkit-slider-thumb {
 #viewer::-webkit-scrollbar-button:single-button:horizontal:increment {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23bcbcbc'><path d='M16 12l-8 7V5z'/></svg>");
 }
+/* Darker scroll arrows on the light interface theme (the default light-gray
+   glyphs would be too faint on a light track). */
+:root[data-ui-theme='light'] #viewer::-webkit-scrollbar-button:single-button:vertical:decrement {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2352525b'><path d='M12 8l-7 8h14z'/></svg>");
+}
+:root[data-ui-theme='light'] #viewer::-webkit-scrollbar-button:single-button:vertical:increment {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2352525b'><path d='M12 16l7-8H5z'/></svg>");
+}
+:root[data-ui-theme='light'] #viewer::-webkit-scrollbar-button:single-button:horizontal:decrement {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2352525b'><path d='M8 12l8-7v14z'/></svg>");
+}
+:root[data-ui-theme='light'] #viewer::-webkit-scrollbar-button:single-button:horizontal:increment {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2352525b'><path d='M16 12l-8 7V5z'/></svg>");
+}
 
 #pages {
   display: flex;
   flex-direction: column;
-  align-items: center;
   gap: 18px;
   padding: 22px 0 60px;
   min-height: 100%;
 }
 
+/* Each row holds a page plus its two side margins ("rascunho" — scratch
+   space). The row stretches to the viewer's full width (flex default),
+   and the margins' widths are computed in JS from the leftover space
+   beside the page, so page + left margin + right margin always sums to
+   the row's own width. */
+.page-row {
+  display: flex;
+  flex: none;
+}
+
+/* Blank, drawable margin beside a page. Width/height are set in JS
+   (scratch margin layout); pointer-events only turn on for the drawing
+   tools, same as .anno-layer, so clicks pass through otherwise (pan,
+   select, plain scrolling). */
+.scratch-layer {
+  display: block;
+  flex: none;
+  background: transparent;
+  pointer-events: none;
+}
+#viewer[data-tool='pen'] .scratch-layer,
+#viewer[data-tool='highlighter'] .scratch-layer,
+#viewer[data-tool='eraser'] .scratch-layer {
+  pointer-events: auto;
+  touch-action: none;
+  cursor: crosshair;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+#viewer[data-tool='eraser'] .scratch-layer { cursor: cell; }
+
 .page {
   position: relative;
   background: #ffffff;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.7);
+  box-shadow: var(--page-shadow);
   flex: none;
 }
 .page .pdf-layer,
@@ -253,6 +460,42 @@ input[type='range']::-webkit-slider-thumb {
   width: 100%; height: 100%;
 }
 .page .pdf-layer { position: relative; }
+
+/* Invisible, selectable text overlay (pdf.js TextLayer). Spans are laid
+   out by pdf.js in the page's unrotated space; renderTextLayer() applies
+   the rotation as a CSS matrix on this container (see renderer.js). */
+.page .text-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
+.page .text-layer span,
+.page .text-layer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  transform-origin: 0% 0%;
+}
+.page .text-layer span.markedContent { top: 0; height: 0; }
+.page .text-layer ::selection { background: rgba(56, 189, 248, 0.35); }
+/* Text is only interactive in the select tool — otherwise it would swallow
+   pan-drags and steal drawing input from the layer above it. */
+#viewer[data-tool='select'] .page .text-layer {
+  pointer-events: auto;
+  user-select: text;
+}
+#viewer[data-tool='select'] .page .text-layer span { cursor: text; }
+
+/* The annotation canvas only needs to capture pointer input while an
+   actual drawing tool is active; otherwise it sits inert on top of the
+   text layer so clicks/drags fall through to it (or to pan-scroll). */
+.page .anno-layer { pointer-events: none; }
+#viewer[data-tool='pen'] .page .anno-layer,
+#viewer[data-tool='highlighter'] .page .anno-layer,
+#viewer[data-tool='eraser'] .page .anno-layer { pointer-events: auto; }
 
 /* PDF themes: apply a filter to the rendered PDF only — annotations,
    which live on the separate .anno-layer, are never touched. */
@@ -374,6 +617,37 @@ kbd {
   background: var(--accent-soft);
 }
 .modal-foot { padding: 14px 18px; border-top: 1px solid var(--line); }
+
+/* ===================== SHOVE BUTTONS ===================== */
+/* Push the whole page column to one side to free up scratch margin on the
+   other. Fixed (not scrolling) — position is computed in JS against the
+   viewer's own on-screen rect, same approach as the theme popovers. */
+.shove-btn {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+  z-index: 30;
+  opacity: 0.5;
+  transition: opacity 0.12s, color 0.12s, border-color 0.12s, background 0.12s;
+}
+.shove-btn:hover { opacity: 1; color: var(--text); }
+.shove-btn.active { opacity: 1; color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.shove-btn svg {
+  width: 18px; height: 18px;
+  fill: none; stroke: currentColor;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+#shove-left-btn { border-radius: 0 10px 10px 0; }
+#shove-right-btn { border-radius: 10px 0 0 10px; }
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }

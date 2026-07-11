@@ -13,6 +13,14 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <!-- ===================== TAB BAR ===================== -->
+  <div id="tabbar" hidden>
+    <div id="tabs"></div>
+    <button class="tb-btn" id="tab-add-btn" data-action="open" title="Abrir PDF (nova aba)">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </div>
+
   <!-- ===================== TOOLBAR ===================== -->
   <header id="toolbar">
     <div class="tb-group brand-group">
@@ -107,6 +115,12 @@
 
     <div class="tb-group">
       <div class="theme-wrap">
+        <button class="tb-btn" data-action="uiThemeMenu" title="Tema da interface" id="ui-theme-btn">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="8" cy="9" r="1.1"/><circle cx="12" cy="7.5" r="1.1"/><circle cx="16" cy="9" r="1.1"/><path d="M12 12a4 4 0 0 0 0 9 2 2 0 0 0 2-2 2 2 0 0 1 2-2h1"/></svg>
+        </button>
+        <div id="ui-theme-menu" class="popover" hidden></div>
+      </div>
+      <div class="theme-wrap">
         <button class="tb-btn" data-action="themeMenu" title="Tema do PDF" id="dark-btn">
           <svg viewBox="0 0 24 24"><path d="M20 14A8 8 0 1 1 10 4a6 6 0 0 0 10 10z"/></svg>
         </button>
@@ -136,6 +150,13 @@
       <p class="hint">Atalho: <kbd id="hint-open">Ctrl+O</kbd></p>
     </div>
     <div id="pages"></div>
+
+    <button class="shove-btn" id="shove-left-btn" data-action="shoveRight" title="Empurrar PDF para a direita (abre rascunho a esquerda)" hidden>
+      <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+    <button class="shove-btn" id="shove-right-btn" data-action="shoveLeft" title="Empurrar PDF para a esquerda (abre rascunho a direita)" hidden>
+      <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
   </main>
 
   <!-- ===================== STATUS ===================== -->

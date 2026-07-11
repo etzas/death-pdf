@@ -91,6 +91,9 @@ direto no Death PDF. Se o app ja estiver aberto, o PDF carrega na mesma janela.
 
 ## Funcoes
 
+- **Temas da interface** — a aparencia do proprio app (Death com destaque
+  vermelho, Preto e branco totalmente monocromatico, e Claro). Botao de paleta
+  abre o menu; a escolha e lembrada entre sessoes.
 - **Temas de leitura do PDF** — varios temas configuraveis (Normal, Escuro
   invertido, Preto e branco, Sepia escuro, Noturno). Aplicam um filtro so na
   pagina renderizada; suas marcacoes NAO sao alteradas. Botao de lua abre o

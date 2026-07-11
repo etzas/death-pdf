@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
+const crypto = require('crypto');
 
 // On Linux (esp. VMs like AlmaLinux) the GPU path spams benign
 // "GetVSyncParametersIfAvailable() failed" errors. Software rendering
@@ -111,10 +112,10 @@ ipcMain.handle('dialog:openPdf', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     title: 'Abrir PDF',
     filters: [{ name: 'PDF', extensions: ['pdf'] }],
-    properties: ['openFile'],
+    properties: ['openFile', 'multiSelections'],
   });
   if (canceled || !filePaths.length) return null;
-  return await readPdf(filePaths[0]);
+  return Promise.all(filePaths.map(readPdf));
 });
 
 ipcMain.handle('file:readPdf', async (_e, filePath) => readPdf(filePath));
@@ -128,15 +129,38 @@ async function readPdf(filePath) {
   };
 }
 
-// Annotations sidecar: <file>.pdf -> <file>.pdf.deathpdf.json
-function sidecarFor(pdfPath) {
+// Annotations are stored inside the app's own userData folder, keyed by a
+// hash of the PDF's absolute path, so nothing is written next to the PDF.
+function annotationsDir() {
+  return path.join(app.getPath('userData'), 'annotations');
+}
+
+function annotationsFileFor(pdfPath) {
+  const key = crypto.createHash('sha256').update(path.resolve(pdfPath)).digest('hex');
+  return path.join(annotationsDir(), key + '.json');
+}
+
+// Older versions wrote a sidecar next to the PDF (<file>.pdf.deathpdf.json).
+// Kept only so existing annotations migrate into the new location and the
+// leftover file gets cleaned up from the user's folder.
+function legacySidecarFor(pdfPath) {
   return pdfPath + '.deathpdf.json';
 }
 
 ipcMain.handle('annotations:load', async (_e, pdfPath) => {
   try {
-    const raw = await fs.readFile(sidecarFor(pdfPath), 'utf-8');
+    const raw = await fs.readFile(annotationsFileFor(pdfPath), 'utf-8');
     return JSON.parse(raw);
+  } catch {
+    // fall through to legacy migration below
+  }
+  try {
+    const raw = await fs.readFile(legacySidecarFor(pdfPath), 'utf-8');
+    const data = JSON.parse(raw);
+    await fs.mkdir(annotationsDir(), { recursive: true });
+    await fs.writeFile(annotationsFileFor(pdfPath), raw, 'utf-8');
+    await fs.unlink(legacySidecarFor(pdfPath)).catch(() => {});
+    return data;
   } catch {
     return null;
   }
@@ -144,7 +168,8 @@ ipcMain.handle('annotations:load', async (_e, pdfPath) => {
 
 ipcMain.handle('annotations:save', async (_e, pdfPath, data) => {
   try {
-    await fs.writeFile(sidecarFor(pdfPath), JSON.stringify(data), 'utf-8');
+    await fs.mkdir(annotationsDir(), { recursive: true });
+    await fs.writeFile(annotationsFileFor(pdfPath), JSON.stringify(data), 'utf-8');
     return true;
   } catch (err) {
     return { error: String(err) };
