@@ -19,8 +19,8 @@ const state = {
   rotation: 0, // 0 | 90 | 180 | 270, clockwise degrees
   shove: 'none', // 'none' | 'left' | 'right' — pushes the page column to
                  // one side to free up scratch margin on the other
-  tool: 'select',
-  prevTool: 'select',
+  tool: 'pan',
+  prevTool: 'pan',
   theme: 'none', // PDF viewing theme id (see PDF_THEMES)
   lastDark: 'invert', // remembered dark theme for the quick toggle
   penColor: '#ececec',
@@ -1442,9 +1442,9 @@ function setTool(tool) {
 }
 
 // Pressing a tool's shortcut (or clicking its button) again turns it off,
-// falling back to the default select tool.
+// falling back to the default hand (pan) tool.
 function toggleTool(tool) {
-  setTool(state.tool === tool ? 'select' : tool);
+  setTool(state.tool === tool ? 'pan' : tool);
 }
 
 function renderToolOptions() {
@@ -1568,11 +1568,11 @@ function hexToRgb(hex) {
 // ============================================================
 const ACTIONS = {
   open: openViaDialog,
-  toolSelect: () => setTool('select'),
+  toolSelect: () => toggleTool('select'),
   toolPen: () => toggleTool('pen'),
   toolHighlighter: () => toggleTool('highlighter'),
   toolEraser: () => toggleTool('eraser'),
-  toolPan: () => toggleTool('pan'),
+  toolPan: () => setTool('pan'),
   darkMode: toggleTheme,
   themeMenu: toggleThemeMenu,
   uiThemeMenu: toggleUiThemeMenu,
@@ -1672,7 +1672,7 @@ document.addEventListener('click', (e) => {
 window.addEventListener('keyup', (e) => {
   if (e.key === ' ' && spaceHeld) {
     spaceHeld = false;
-    setTool(state.prevTool || 'select');
+    setTool(state.prevTool || 'pan');
   }
 });
 
@@ -1811,7 +1811,7 @@ function updateHints() {
 // Boot
 // ============================================================
 initDrawingInput();
-setTool('select');
+setTool('pan');
 updateHints();
 
 // Restore the last-used interface theme (global preference).
