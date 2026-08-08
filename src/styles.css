@@ -249,6 +249,7 @@ body {
   transition: background 0.12s, color 0.12s;
 }
 .tb-btn:hover { background: var(--surface-2); color: var(--text); }
+.tb-btn:disabled { opacity: 0.35; cursor: default; pointer-events: none; }
 .tb-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .tb-btn.active { color: var(--text); background: var(--accent-soft); }
 .tb-btn.active::after {
@@ -361,20 +362,25 @@ input[type='range']::-webkit-slider-thumb {
   scrollbar-width: thin;
   scrollbar-color: var(--line) transparent;
 }
-#viewer::-webkit-scrollbar { width: 38px; height: 38px; }
+#viewer::-webkit-scrollbar { width: 56px; height: 38px; }
 #viewer::-webkit-scrollbar-track { background: var(--surface); }
 #viewer::-webkit-scrollbar-thumb {
   background: var(--scroll-thumb); border-radius: 19px;
   border: 5px solid var(--surface); min-height: 40px;
 }
 #viewer::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
-/* Bigger, clearly clickable scroll arrows at the ends of the bar. */
+/* Bigger, clearly clickable scroll arrows at the ends of the bar. The
+   vertical (up/down page-scrolling) bar and its buttons are noticeably
+   larger than the horizontal one, since that's the one used constantly. */
 #viewer::-webkit-scrollbar-button:single-button {
   background: var(--surface-2);
-  height: 38px; width: 38px;
+  height: 308px; width: 308px;
   background-repeat: no-repeat;
   background-position: center;
   background-size: 26px;
+}
+#viewer::-webkit-scrollbar-button:single-button:vertical {
+  width: 1000px; height: 1000px; background-size: 1000px;
 }
 #viewer::-webkit-scrollbar-button:single-button:hover { background-color: var(--line); }
 /* Up */
@@ -482,12 +488,27 @@ input[type='range']::-webkit-slider-thumb {
 .page .text-layer span.markedContent { top: 0; height: 0; }
 .page .text-layer ::selection { background: rgba(56, 189, 248, 0.35); }
 /* Text is only interactive in the select tool — otherwise it would swallow
-   pan-drags and steal drawing input from the layer above it. */
+   pan-drags and steal drawing input from the layer above it.
+   The container itself stays pointer-events:none even here — only the
+   glyph spans get pointer-events:auto (below). Precision fix: with the
+   whole container hit-testable, a click landing in a gap between spans
+   (line spacing, margins, over an image) still got captured by the
+   container box and "snapped" to whichever text node was nearest — the
+   #1 cause of wrong/undesired selections, especially with a pen/tablet
+   where the contact point is naturally less precise than a mouse click.
+   Scoping pointer-events to the spans themselves means a stray tap in a
+   gap now falls through instead of hijacking the selection.
+   touch-action: none stops the tablet's own scroll/pan gesture recognizer
+   from competing with the drag-to-select gesture (another source of
+   "jumps mid-selection" on pen/touch input). */
 #viewer[data-tool='select'] .page .text-layer {
-  pointer-events: auto;
   user-select: text;
+  touch-action: none;
 }
-#viewer[data-tool='select'] .page .text-layer span { cursor: text; }
+#viewer[data-tool='select'] .page .text-layer span {
+  pointer-events: auto;
+  cursor: text;
+}
 
 /* The annotation canvas only needs to capture pointer input while an
    actual drawing tool is active; otherwise it sits inert on top of the
@@ -648,6 +669,175 @@ kbd {
 }
 #shove-left-btn { border-radius: 0 10px 10px 0; }
 #shove-right-btn { border-radius: 10px 0 0 10px; }
+
+/* ===================== FIND BAR (Ctrl+F) ===================== */
+/* Fixed to the viewer's top-right corner, browser/reader style. Position
+   is set in JS against the viewer's own on-screen rect (positionFindBar()),
+   same approach as the theme popovers and shove buttons. */
+#find-bar {
+  position: fixed;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+  z-index: 60;
+}
+#find-input {
+  width: 200px; height: 30px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 0 9px; font-family: var(--ui); font-size: 13px;
+}
+#find-input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+#find-input.no-match { border-color: var(--accent); }
+#find-count {
+  min-width: 56px; text-align: center;
+  font-size: 12px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.find-divider { width: 1px; height: 22px; background: var(--line); margin: 0 2px; flex: none; }
+
+/* CSS Custom Highlight API — paints match ranges without touching the
+   text-layer DOM (which stays free for selection/copy and gets rebuilt
+   on every zoom/rotation). All matches in soft accent, current match in
+   solid accent so it stands out among the rest. */
+::highlight(pdf-search-all) { background-color: var(--accent-soft); }
+::highlight(pdf-search-current) { background-color: var(--accent); color: var(--bg); }
+
+/* ===================== TEXT HIGHLIGHTS (marca-texto) ===================== */
+/* Sits between the pdf canvas and the (invisible) text layer, so the
+   colored mark reads like a real highlighter under the glyphs instead of
+   painting over them. Positioned in JS from the highlight's Range
+   (redrawTextHighlights()), so it always matches the current zoom/rotation. */
+.highlight-layer {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+}
+.text-hl {
+  position: absolute;
+  mix-blend-mode: multiply;
+  border-radius: 2px;
+  pointer-events: auto;
+  cursor: pointer;
+}
+/* On the inverted/dark PDF themes the page canvas is already flipped, so a
+   multiply blend would darken the mark instead of tinting it — screen
+   reads the right way round there instead. */
+#viewer[data-theme='invert'] .text-hl,
+#viewer[data-theme='bw'] .text-hl,
+#viewer[data-theme='night'] .text-hl { mix-blend-mode: screen; }
+
+/* Small comment-bubble marker for a highlight that has a note attached.
+   Always clickable (not gated to the select tool) so notes can be reviewed
+   while panning — it sits in the gap just above its highlight's line,
+   which the (span-scoped) text layer never claims, so it stays reachable
+   even in select mode. */
+/* Fixed (not theme-driven) colors on purpose: this sits over the *PDF
+   page* — which stays white-paper-ish or inverted-dark regardless of the
+   app chrome's own UI theme — and it needs to read the same against both.
+   var(--accent) would also break outright in the mono UI theme, where
+   --accent is set equal to --text (white on white, invisible) — the same
+   bug .hl-save-btn had. A fixed dark disc + light ring pops against a
+   light page; the ring alone keeps it visible against a dark/inverted one. */
+.hl-note-marker {
+  position: absolute;
+  width: 17px; height: 17px;
+  border: none; border-radius: 50%;
+  background: #1f1f24;
+  color: #fff;
+  padding: 3px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  pointer-events: auto;
+  z-index: 2;
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85), 0 1px 5px rgba(0, 0, 0, 0.5);
+}
+.hl-note-marker svg {
+  width: 100%; height: 100%;
+  fill: none; stroke: currentColor;
+  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* Floating toolbar shown above a fresh, non-empty text selection (select
+   tool only) — pick a color to mark it, or attach a note. Positioned in JS
+   against the selection's own bounding rect (see positionFloating()). */
+#selection-toolbar {
+  position: fixed;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 7px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+  z-index: 70;
+}
+.hl-swatches { display: flex; gap: 5px; }
+.hl-swatch {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  background-clip: padding-box;
+}
+.hl-swatch.active { border-color: var(--text); }
+
+/* Note editor — reused both to attach a note to a brand-new selection and
+   to edit/remove an existing highlight (see openNoteEditor() in JS). */
+#hl-note-popover {
+  position: fixed;
+  width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+  z-index: 70;
+}
+#hl-note-textarea {
+  width: 100%;
+  min-height: 70px;
+  resize: vertical;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  font-family: var(--ui);
+  font-size: 13px;
+  line-height: 1.4;
+}
+#hl-note-textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+.hl-note-actions { display: flex; justify-content: space-between; gap: 8px; }
+.hl-note-actions .ghost-btn { padding: 7px 12px; font-size: 12px; }
+/* Same recipe as #dark-btn.on / .tb-btn.tool.active: --accent-soft is a
+   translucent tint (never a solid fill), so the foreground stays --text
+   instead of --accent — the mono theme sets --accent to the same white as
+   --text, and a solid --accent background with --accent (or #fff) text
+   would render as invisible white-on-white there. */
+.hl-save-btn {
+  background: var(--accent-soft);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 7px 14px;
+  font-family: var(--ui);
+  font-size: 12px;
+  cursor: pointer;
+}
+.hl-save-btn:hover { filter: brightness(1.15); }
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }

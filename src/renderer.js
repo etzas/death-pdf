@@ -29,6 +29,9 @@ const state = {
   hlWidth: 18,
   eraserWidth: 22,
   annotations: {}, // { [pageNum]: [stroke] }
+  textHighlights: {}, // { [pageNum]: [{ id, start, end, color, note }] } — real
+                       // text marks (select text, mark it), as opposed to the
+                       // freehand `highlighter` tool's drawn strokes above.
   undoStack: [],
   redoStack: [],
   dirty: false, // unsaved annotation changes
@@ -65,6 +68,7 @@ const DEFAULT_UI_THEME = 'death';
 // ============================================================
 const DEFAULT_SHORTCUTS = {
   open: 'ctrl+o',
+  find: 'ctrl+f',
   toolSelect: 'v',
   toolPen: 'p',
   toolHighlighter: 'h',
@@ -94,6 +98,7 @@ const DEFAULT_SHORTCUTS = {
 
 const ACTION_LABELS = {
   open: 'Abrir PDF',
+  find: 'Pesquisar no PDF',
   toolSelect: 'Ferramenta: selecionar',
   toolPen: 'Ferramenta: caneta',
   toolHighlighter: 'Ferramenta: marca-texto',
@@ -207,6 +212,20 @@ const shoveRightBtn = document.getElementById('shove-right-btn');
 const statusEl = document.getElementById('status');
 const tabbarEl = document.getElementById('tabbar');
 const tabsEl = document.getElementById('tabs');
+const findBar = document.getElementById('find-bar');
+const findInput = document.getElementById('find-input');
+const findCount = document.getElementById('find-count');
+const findPrevBtn = document.getElementById('find-prev-btn');
+const findNextBtn = document.getElementById('find-next-btn');
+const findCloseBtn = document.getElementById('find-close-btn');
+const selectionToolbar = document.getElementById('selection-toolbar');
+const selectionSwatchesEl = document.getElementById('selection-swatches');
+const selectionNoteBtn = document.getElementById('selection-note-btn');
+const hlNotePopover = document.getElementById('hl-note-popover');
+const hlPopoverSwatchesEl = document.getElementById('hl-popover-swatches');
+const hlNoteTextarea = document.getElementById('hl-note-textarea');
+const hlNoteRemoveBtn = document.getElementById('hl-note-remove-btn');
+const hlNoteSaveBtn = document.getElementById('hl-note-save-btn');
 
 // ============================================================
 // Tabs
@@ -222,7 +241,7 @@ let tabIdSeq = 0;
 const TAB_FIELDS = [
   'pdf', 'pdfBytes', 'pdfPath', 'pdfName', 'numPages', 'pageDims',
   'scale', 'rotation', 'shove', 'theme', 'lastDark', 'annotations',
-  'undoStack', 'redoStack', 'dirty',
+  'textHighlights', 'undoStack', 'redoStack', 'dirty',
 ];
 
 function activeTabRecord() {
@@ -246,6 +265,7 @@ function updateActiveTabDot() {
 }
 
 function activateTab(tab) {
+  closeFindBar(); // search state/highlights belong to the outgoing document
   activeTabId = tab.id;
   restoreStateFrom(tab);
   viewer.dataset.theme = state.theme;
@@ -301,6 +321,7 @@ function cycleTab(dir) {
 }
 
 function resetToEmpty() {
+  closeFindBar();
   if (io) { io.disconnect(); io = null; }
   pagesEl.innerHTML = '';
   state.pdf = null;
@@ -313,6 +334,7 @@ function resetToEmpty() {
   state.rotation = 0;
   state.shove = 'none';
   state.annotations = {};
+  state.textHighlights = {};
   state.undoStack = [];
   state.redoStack = [];
   state.dirty = false;
@@ -420,6 +442,7 @@ function loadPdf(fileInfo) {
 }
 
 async function loadPdfImpl({ bytes, path, name }) {
+  closeFindBar();
   const prevActiveId = activeTabId;
   snapshotActiveTab();
   const id = ++tabIdSeq;
@@ -446,6 +469,7 @@ async function loadPdfImpl({ bytes, path, name }) {
 
     // Load saved annotations, if any.
     state.annotations = {};
+    state.textHighlights = {};
     state.undoStack = [];
     state.redoStack = [];
     state.rotation = 0;
@@ -454,6 +478,7 @@ async function loadPdfImpl({ bytes, path, name }) {
     const saved = await window.dpdf.loadAnnotations(path);
     if (saved && saved.annotations) {
       state.annotations = saved.annotations;
+      if (saved.textHighlights) state.textHighlights = saved.textHighlights;
       if (typeof saved.rotation === 'number') state.rotation = saved.rotation;
       if (saved.shove === 'left' || saved.shove === 'right') state.shove = saved.shove;
       // Migrate the legacy `darkMode` boolean to the new theme system.
@@ -571,6 +596,9 @@ function clearPageCanvas(pageEl) {
   const t = pageEl.querySelector('.text-layer');
   t.innerHTML = '';
   t.style.transform = '';
+  clearPageSearchHighlights(pageEl); // the spans they anchored to are gone
+  const hlLayer = pageEl.querySelector('.highlight-layer');
+  if (hlLayer) hlLayer.innerHTML = ''; // same — its rects were measured off those spans
 
   // Free the scratch-margin canvases too — they're reallocated lazily by
   // layoutScratchForPage() the next time this page becomes visible.
@@ -579,8 +607,19 @@ function clearPageCanvas(pageEl) {
   clearScratchCanvas(row.querySelector('.scratch-right'));
 }
 
-async function renderPage(pageEl) {
-  if (pageEl.dataset.rendered === 'true' || pageEl._rendering) return;
+async function renderPage(pageEl, opts = {}) {
+  if (pageEl.dataset.rendered === 'true' || pageEl._rendering) {
+    // Already rendered (or another caller is mid-render): the canvas is
+    // handled, but a caller that specifically needs the text layer (e.g.
+    // jumping to a search match) still has to wait for it.
+    if (pageEl._rendering) {
+      while (pageEl._rendering) await new Promise((r) => setTimeout(r, 30));
+    }
+    if (opts.awaitText && pageEl._textLayerPromise) {
+      try { await pageEl._textLayerPromise; } catch {}
+    }
+    return;
+  }
   pageEl._rendering = true;
   const num = +pageEl.dataset.page;
   try {
@@ -610,11 +649,15 @@ async function renderPage(pageEl) {
 
     redrawAnnotations(pageEl);
     layoutScratchForPage(pageEl);
-    // Not awaited: text isn't needed for the page to count as "rendered",
-    // and it shouldn't block canvas rendering of the next visible page.
-    renderTextLayer(pageEl, page).catch((err) => {
+    // Not awaited by default: text isn't needed for the page to count as
+    // "rendered", and it shouldn't block canvas rendering of the next
+    // visible page. Callers that specifically need the text layer (e.g.
+    // jumping to a search match) can pass { awaitText: true }.
+    const textPromise = renderTextLayer(pageEl, page).catch((err) => {
       if (err && err.name !== 'AbortException') console.error(err);
     });
+    pageEl._textLayerPromise = textPromise;
+    if (opts.awaitText) await textPromise;
   } catch (err) {
     if (err && err.name !== 'RenderingCancelledException') console.error(err);
   } finally {
@@ -668,6 +711,14 @@ async function renderTextLayer(pageEl, page) {
     unrotatedViewport.width,
     unrotatedViewport.height
   );
+
+  // The text layer was just rebuilt from scratch (innerHTML = '' above),
+  // so any search highlights anchored to its old spans are gone — repaint
+  // this page's matches against the fresh ones.
+  if (searchState.open && searchState.term) refreshPageSearchHighlights(pageEl);
+  // Same story for persisted text highlights — their Ranges anchored to
+  // the torn-down spans too, so rebuild them against the fresh ones.
+  redrawTextHighlights(pageEl);
 }
 
 // Re-render everything currently on/near screen (after zoom).
@@ -1254,6 +1305,7 @@ async function save() {
     rotation: state.rotation,
     shove: state.shove,
     annotations: state.annotations,
+    textHighlights: state.textHighlights,
   });
   if (res === true) {
     state.dirty = false;
@@ -1439,6 +1491,13 @@ function setTool(tool) {
     .querySelectorAll('#tool-group .tool')
     .forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
   renderToolOptions();
+  if (tool !== 'select') {
+    // Marking only makes sense while the select tool is live — drop any
+    // leftover native selection and its toolbar so it doesn't linger,
+    // invisible, into whatever tool comes next.
+    window.getSelection()?.removeAllRanges();
+    hideSelectionToolbar();
+  }
 }
 
 // Pressing a tool's shortcut (or clicking its button) again turns it off,
@@ -1488,10 +1547,59 @@ widthSlider.addEventListener('input', () => {
   else if (state.tool === 'highlighter') state.hlWidth = v;
   else if (state.tool === 'eraser') state.eraserWidth = v;
 });
+// Once the drag/keyboard adjustment ends, release focus so the slider
+// doesn't keep swallowing keyboard shortcuts (tool switching, arrows, etc.)
+// the way a focused <input> normally would.
+widthSlider.addEventListener('change', () => widthSlider.blur());
 
 // ============================================================
 // Export annotated PDF (flattened, via pdf-lib)
 // ============================================================
+// Computes a page's text highlights in PDF point space (top-down, origin at
+// the page's own top-left — same convention drawLine()/drawCircle() above
+// convert from) for export. Reuses the exact same rendering pdf.js uses
+// on-screen (a fresh TextLayer at scale 1 rotation 0, off in a detached
+// corner of the document) rather than approximating glyph geometry by
+// hand, so the exported rectangles land exactly where they show in-app.
+async function highlightRectsForExport(pageNum) {
+  const list = state.textHighlights[pageNum];
+  if (!list || !list.length) return [];
+  const page = await state.pdf.getPage(pageNum);
+  const viewport = page.getViewport({ scale: 1, rotation: 0 });
+  const container = document.createElement('div');
+  container.style.cssText = 'position:fixed; left:-99999px; top:0; line-height:1; visibility:hidden;';
+  container.style.width = viewport.width + 'px';
+  container.style.height = viewport.height + 'px';
+  container.style.setProperty('--scale-factor', 1); // TextLayer spans size themselves off this
+  document.body.appendChild(container);
+  try {
+    const textContent = await page.getTextContent();
+    const task = new pdfjsLib.TextLayer({ textContentSource: textContent, container, viewport });
+    await task.render();
+    const { segs } = buildDomText(collectTextNodes(container));
+    const pr = container.getBoundingClientRect();
+    const out = [];
+    for (const hl of list) {
+      const ranges = rangesForMatch(segs, hl.start, hl.end);
+      for (const r of ranges) {
+        for (const rect of r.getClientRects()) {
+          if (rect.width < 0.5 || rect.height < 0.5) continue;
+          out.push({
+            x: rect.left - pr.left,
+            y: rect.top - pr.top,
+            width: rect.width,
+            height: rect.height,
+            color: hl.color,
+          });
+        }
+      }
+    }
+    return out;
+  } finally {
+    container.remove();
+  }
+}
+
 async function exportPdf() {
   if (!state.pdf || !window.PDFLib) return;
   toast('Gerando PDF...');
@@ -1507,6 +1615,25 @@ async function exportPdf() {
       for (const page of pages) {
         const base = page.getRotation().angle || 0;
         page.setRotation(degrees((base + state.rotation) % 360));
+      }
+    }
+
+    for (const [numStr, list] of Object.entries(state.textHighlights)) {
+      const num = +numStr;
+      const page = pages[num - 1];
+      if (!page || !list.length) continue;
+      const { height: ph } = page.getSize();
+      const rects = await highlightRectsForExport(num);
+      for (const rect of rects) {
+        const col = hexToRgb(rect.color);
+        page.drawRectangle({
+          x: rect.x,
+          y: ph - rect.y - rect.height,
+          width: rect.width,
+          height: rect.height,
+          color: rgb(col.r, col.g, col.b),
+          opacity: 0.32,
+        });
       }
     }
 
@@ -1564,10 +1691,722 @@ function hexToRgb(hex) {
 }
 
 // ============================================================
+// Search (Ctrl+F) — find text across the whole document
+//
+// Match highlighting uses the CSS Custom Highlight API (`::highlight()`)
+// against Range objects anchored to the text-layer's own DOM text nodes,
+// so it never mutates that layer (which stays free for selection/copy and
+// gets torn down and rebuilt on every zoom/rotation/scroll-out).
+//
+// Counting/navigation ("N of M"), though, has to work across pages that
+// aren't rendered at all — so it runs on a separate, DOM-independent copy
+// of each page's text pulled straight from pdf.js's getTextContent(). The
+// two are kept in step because a rendered page's DOM text (spans, walked
+// in order) reproduces the same string as its getTextContent() items
+// (walked in order): same source, same order, so the Nth match found in
+// one is the Nth match found in the other.
+// ============================================================
+const SEARCH_ALL_HL = 'pdf-search-all';
+const SEARCH_CUR_HL = 'pdf-search-current';
+const highlightsSupported = typeof Highlight !== 'undefined' && !!window.CSS?.highlights;
+const allMatchesHL = highlightsSupported ? new Highlight() : null;
+const currentMatchHL = highlightsSupported ? new Highlight() : null;
+if (highlightsSupported) {
+  CSS.highlights.set(SEARCH_ALL_HL, allMatchesHL);
+  CSS.highlights.set(SEARCH_CUR_HL, currentMatchHL);
+}
+
+const searchState = {
+  open: false,
+  term: '', // already lowercased
+  total: 0,
+  current: -1, // 0-based index into the whole document's matches
+  byPage: [], // match count per page, index 0 = page 1
+  currentPageNum: null,
+  currentLocalIndex: -1, // index of the current match within its own page
+  currentRanges: null, // Range[] for the current match (rarely more than one)
+};
+
+function normalizeSearchText(s) {
+  return s.toLowerCase();
+}
+
+// Page text for counting/locating matches — independent of whether the
+// page is actually rendered. Reuses the cache renderTextLayer() already
+// keeps on rendered pages instead of re-extracting.
+async function getPageText(pageNum) {
+  const pageEl = pagesEl.querySelector(`.page[data-page="${pageNum}"]`);
+  if (pageEl && pageEl._textContent) {
+    return pageEl._textContent.items.map((it) => it.str || '').join('');
+  }
+  const page = await state.pdf.getPage(pageNum);
+  const tc = await page.getTextContent();
+  if (pageEl) pageEl._textContent = tc;
+  return tc.items.map((it) => it.str || '').join('');
+}
+
+function countMatches(text, term) {
+  if (!term) return 0;
+  let count = 0;
+  let idx = 0;
+  while (true) {
+    const found = text.indexOf(term, idx);
+    if (found === -1) break;
+    count++;
+    idx = found + term.length;
+  }
+  return count;
+}
+
+// Walks every text node under a text-layer container in document order —
+// the same order pdf.js appended its spans in, which is the same order
+// getTextContent() lists its items in.
+function collectTextNodes(container) {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  let n;
+  while ((n = walker.nextNode())) nodes.push(n);
+  return nodes;
+}
+
+// Concatenates those text nodes into one lowercased string plus a map back
+// from character offsets to (node, offset-within-node), so a match found
+// in the concatenated string can be turned back into real DOM Ranges.
+function buildDomText(nodes) {
+  let text = '';
+  const segs = [];
+  for (const node of nodes) {
+    const val = node.nodeValue || '';
+    if (!val) continue;
+    const start = text.length;
+    text += val;
+    segs.push({ node, start, end: text.length });
+  }
+  return { text: text.toLowerCase(), segs };
+}
+
+// A match's [start, end) range in the concatenated string usually falls
+// within one text node, but can straddle a boundary (e.g. a span break
+// pdf.js inserted mid-word) — split it into one Range per node it touches.
+function rangesForMatch(segs, start, end) {
+  const ranges = [];
+  for (const seg of segs) {
+    const s = Math.max(start, seg.start);
+    const e = Math.min(end, seg.end);
+    if (s >= e) continue;
+    const r = document.createRange();
+    r.setStart(seg.node, s - seg.start);
+    r.setEnd(seg.node, e - seg.start);
+    ranges.push(r);
+  }
+  return ranges;
+}
+
+function findAllRanges(text, segs, term) {
+  const out = [];
+  if (!term) return out;
+  let idx = 0;
+  while (true) {
+    const found = text.indexOf(term, idx);
+    if (found === -1) break;
+    out.push(rangesForMatch(segs, found, found + term.length));
+    idx = found + term.length;
+  }
+  return out;
+}
+
+// Drops a rendered page's ranges from the "all matches" highlight (its
+// text-layer spans are about to be, or already were, torn down).
+function clearPageSearchHighlights(pageEl) {
+  if (allMatchesHL && pageEl._searchRanges) {
+    for (const r of pageEl._searchRanges) allMatchesHL.delete(r);
+  }
+  pageEl._searchRanges = null;
+  if (+pageEl.dataset.page === searchState.currentPageNum && currentMatchHL) {
+    currentMatchHL.clear();
+  }
+}
+
+// Recomputes and repaints this rendered page's matches. Called whenever
+// its text layer is (re)built while a search is active — zoom, rotation,
+// and scrolling back into view all rebuild it from scratch.
+function refreshPageSearchHighlights(pageEl) {
+  clearPageSearchHighlights(pageEl);
+  if (!allMatchesHL || !searchState.term) return;
+  const container = pageEl.querySelector('.text-layer');
+  if (!container) return;
+  const { text, segs } = buildDomText(collectTextNodes(container));
+  const matches = findAllRanges(text, segs, searchState.term);
+  pageEl._searchRanges = [];
+  for (const group of matches) {
+    for (const r of group) {
+      allMatchesHL.add(r);
+      pageEl._searchRanges.push(r);
+    }
+  }
+  const num = +pageEl.dataset.page;
+  if (searchState.currentPageNum === num) {
+    const group = matches[searchState.currentLocalIndex];
+    if (group) {
+      currentMatchHL.clear();
+      for (const r of group) currentMatchHL.add(r);
+      searchState.currentRanges = group;
+    }
+  }
+}
+
+function clearCurrentMatchHighlight() {
+  if (currentMatchHL) currentMatchHL.clear();
+  searchState.currentPageNum = null;
+  searchState.currentLocalIndex = -1;
+  searchState.currentRanges = null;
+}
+
+// Turns a global match index into which page it's on and its position
+// within that page's own matches, using the running per-page counts.
+function locateMatch(globalIndex) {
+  let acc = 0;
+  for (let p = 1; p <= state.numPages; p++) {
+    const c = searchState.byPage[p - 1] || 0;
+    if (globalIndex < acc + c) return { pageNum: p, localIndex: globalIndex - acc };
+    acc += c;
+  }
+  return null;
+}
+
+let searchBuildToken = 0;
+async function rebuildMatchCounts() {
+  const token = ++searchBuildToken;
+  const term = searchState.term;
+  searchState.byPage = new Array(state.numPages).fill(0);
+  searchState.total = 0;
+  searchState.current = -1;
+  clearCurrentMatchHighlight();
+  if (!term || !state.pdf) { updateFindUi(); return; }
+  for (let p = 1; p <= state.numPages; p++) {
+    const raw = await getPageText(p);
+    if (token !== searchBuildToken) return; // a newer query superseded this scan
+    searchState.byPage[p - 1] = countMatches(normalizeSearchText(raw), term);
+    searchState.total += searchState.byPage[p - 1];
+    if (p % 8 === 0) updateFindUi(); // live counter while a big doc is still scanning
+  }
+  if (token !== searchBuildToken) return;
+  if (searchState.total > 0) searchState.current = 0;
+  updateFindUi();
+  await jumpToCurrentMatch();
+}
+
+// Scrolls just enough to center the current match, without fighting any
+// in-flight scroll (the caller already got the page roughly on-screen).
+function scrollToCurrentRange() {
+  const ranges = searchState.currentRanges;
+  if (!ranges || !ranges.length) return;
+  const rect = ranges[0].getBoundingClientRect();
+  if (!rect.width && !rect.height) return;
+  const vr = viewer.getBoundingClientRect();
+  const delta = (rect.top + rect.height / 2) - (vr.top + vr.height / 2);
+  viewer.scrollTo({ top: viewer.scrollTop + delta, behavior: 'smooth' });
+}
+
+async function jumpToCurrentMatch() {
+  updateFindUi();
+  if (searchState.current < 0) {
+    clearCurrentMatchHighlight();
+    return;
+  }
+  const loc = locateMatch(searchState.current);
+  if (!loc) return;
+  searchState.currentPageNum = loc.pageNum;
+  searchState.currentLocalIndex = loc.localIndex;
+
+  const pageEl = pagesEl.querySelector(`.page[data-page="${loc.pageNum}"]`);
+  if (!pageEl) return;
+  // Get the page roughly on-screen first (instant — no animation to race
+  // against) so the IntersectionObserver/renderPage below has it in range.
+  viewer.scrollTop = pageEl.offsetTop - 22;
+  await renderPage(pageEl, { awaitText: true });
+  refreshPageSearchHighlights(pageEl);
+  scrollToCurrentRange();
+}
+
+function nextMatch() {
+  if (!searchState.total) return;
+  searchState.current = (searchState.current + 1) % searchState.total;
+  jumpToCurrentMatch();
+}
+function prevMatch() {
+  if (!searchState.total) return;
+  searchState.current = (searchState.current - 1 + searchState.total) % searchState.total;
+  jumpToCurrentMatch();
+}
+
+function updateFindUi() {
+  findCount.textContent = searchState.term ? `${searchState.current + 1}/${searchState.total}` : '';
+  findInput.classList.toggle('no-match', !!searchState.term && searchState.total === 0);
+  findPrevBtn.disabled = findNextBtn.disabled = !searchState.total;
+}
+
+// Fixed to the viewer's own on-screen rect (same trick as positionPopover
+// and positionShoveButtons), so it tracks resizes without scrolling away.
+function positionFindBar() {
+  const r = viewer.getBoundingClientRect();
+  findBar.style.top = r.top + 10 + 'px';
+  findBar.style.right = window.innerWidth - r.right + 14 + 'px';
+}
+
+function openFindBar() {
+  if (!state.pdf) return;
+  searchState.open = true;
+  findBar.hidden = false;
+  positionFindBar();
+  findInput.focus();
+  findInput.select();
+  if (searchState.term) rebuildMatchCounts();
+}
+function closeFindBar() {
+  findBar.hidden = true;
+  searchState.open = false;
+  searchState.term = '';
+  searchState.total = 0;
+  searchState.current = -1;
+  searchState.byPage = [];
+  findInput.value = '';
+  clearCurrentMatchHighlight();
+  if (allMatchesHL) allMatchesHL.clear();
+  pagesEl.querySelectorAll('.page').forEach((el) => { el._searchRanges = null; });
+  updateFindUi(); // otherwise the count label keeps showing the last search's tally
+}
+function toggleFindBar() {
+  if (findBar.hidden) openFindBar();
+  else closeFindBar();
+}
+
+let findDebounce = null;
+findInput.addEventListener('input', () => {
+  clearTimeout(findDebounce);
+  findDebounce = setTimeout(() => {
+    searchState.term = normalizeSearchText(findInput.value.trim());
+    rebuildMatchCounts();
+  }, 180);
+});
+findInput.addEventListener('keydown', (e) => {
+  // Let the find shortcut close the bar even while it holds focus (the
+  // global handler below ignores keydowns while an <input> is focused).
+  if (comboFromEvent(e) === shortcuts.find) { e.preventDefault(); closeFindBar(); return; }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    if (e.shiftKey) prevMatch(); else nextMatch();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeFindBar();
+  }
+});
+findPrevBtn.addEventListener('click', prevMatch);
+findNextBtn.addEventListener('click', nextMatch);
+findCloseBtn.addEventListener('click', closeFindBar);
+
+// ============================================================
+// Text highlights — select real text and mark it (unlike the freehand
+// `highlighter` tool, which just draws strokes), plus an optional note
+// attached to the marked spot. Like search matches, a highlight is stored
+// as a [start, end) character range into the page's own concatenated text
+// (buildDomText/collectTextNodes/rangesForMatch, all defined above for
+// search) — not pixel coordinates — so it survives zoom, rotation and
+// reload without drifting, and gets rebuilt against a page's *current*
+// text-layer DOM every time renderTextLayer() (re)builds it.
+// ============================================================
+let hlIdSeq = 0;
+function nextHlId() {
+  return 'h' + (++hlIdSeq) + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+function pageElByNum(num) {
+  return pagesEl.querySelector(`.page[data-page="${num}"]`);
+}
+
+function ensureHighlightLayer(pageEl) {
+  let layer = pageEl.querySelector('.highlight-layer');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'highlight-layer';
+    pageEl.insertBefore(layer, pageEl.querySelector('.text-layer'));
+  }
+  return layer;
+}
+
+// A Range boundary isn't always (text node, char offset) — double-clicking
+// a word (or Ctrl+A, or a boundary that lands exactly at a node's edge)
+// often gets reported as (element, child index) instead. Walk from that
+// element/index to the actual text node it points at, so offsetsFromRange
+// below always has a text node to match against buildDomText()'s segs.
+function normalizeToTextBoundary(node, offset) {
+  if (node.nodeType === Node.TEXT_NODE) return { node, offset };
+  let child = offset < node.childNodes.length ? node.childNodes[offset] : null;
+  if (child) {
+    while (child && child.nodeType !== Node.TEXT_NODE) child = child.firstChild;
+    if (child) return { node: child, offset: 0 };
+  }
+  // Off the end (or nothing but empty elements forward) — fall back to the
+  // end of whatever text precedes this point.
+  child = offset > 0 ? node.childNodes[offset - 1] : node.lastChild;
+  while (child && child.nodeType !== Node.TEXT_NODE) child = child.lastChild;
+  return child ? { node: child, offset: child.nodeValue.length } : null;
+}
+
+// Maps a live Selection Range — anchored inside one page's text-layer — to
+// [start, end) character offsets in that page's concatenated text.
+function offsetsFromRange(container, range) {
+  const { segs } = buildDomText(collectTextNodes(container));
+  const startPt = normalizeToTextBoundary(range.startContainer, range.startOffset);
+  const endPt = normalizeToTextBoundary(range.endContainer, range.endOffset);
+  if (!startPt || !endPt) return null;
+  let start = null;
+  let end = null;
+  for (const seg of segs) {
+    if (seg.node === startPt.node) start = seg.start + startPt.offset;
+    if (seg.node === endPt.node) end = seg.start + endPt.offset;
+  }
+  if (start == null || end == null) return null;
+  return start <= end ? { start, end } : { start: end, end: start };
+}
+
+// A Range's on-screen rects, translated into the page's own local box (CSS
+// px, matching where .text-hl / .hl-note-marker are positioned).
+function rectsRelativeToPage(range, pageEl) {
+  const pr = pageEl.getBoundingClientRect();
+  const out = [];
+  for (const r of range.getClientRects()) {
+    if (r.width < 0.5 || r.height < 0.5) continue;
+    out.push({ left: r.left - pr.left, top: r.top - pr.top, width: r.width, height: r.height });
+  }
+  return out;
+}
+
+function findHighlight(pageNum, id) {
+  return (state.textHighlights[pageNum] || []).find((h) => h.id === id) || null;
+}
+
+function rangesOverlap(aStart, aEnd, bStart, bEnd) {
+  return aStart < bEnd && bStart < aEnd;
+}
+
+// A page's highlights must never overlap — marking text that's already (in
+// full or in part) under an existing highlight recolors/extends that one
+// instead of stacking a second mark on top of it. Removes every highlight
+// the new [start,end) touches and returns the union range (plus whichever
+// note survives, so a plain recolor over a noted highlight doesn't lose it).
+function mergeOverlappingHighlights(pageNum, start, end) {
+  const list = state.textHighlights[pageNum];
+  if (!list || !list.length) return { start, end, note: null };
+  const keep = [];
+  let note = null;
+  for (const h of list) {
+    if (rangesOverlap(start, end, h.start, h.end)) {
+      start = Math.min(start, h.start);
+      end = Math.max(end, h.end);
+      if (!note && h.note) note = h.note;
+    } else {
+      keep.push(h);
+    }
+  }
+  state.textHighlights[pageNum] = keep;
+  return { start, end, note };
+}
+
+function createHighlight(pageNum, start, end, color, note) {
+  const merged = mergeOverlappingHighlights(pageNum, start, end);
+  const id = nextHlId();
+  (state.textHighlights[pageNum] ||= []).push({
+    id,
+    start: merged.start,
+    end: merged.end,
+    color,
+    note: note || merged.note || null,
+  });
+  redrawAllTextHighlightsOnPage(pageNum);
+  markDirty();
+  return id;
+}
+function updateHighlight(pageNum, id, patch) {
+  const hl = findHighlight(pageNum, id);
+  if (!hl) return;
+  Object.assign(hl, patch);
+  redrawAllTextHighlightsOnPage(pageNum);
+  markDirty();
+}
+function removeHighlight(pageNum, id) {
+  const list = state.textHighlights[pageNum];
+  if (!list) return;
+  const idx = list.findIndex((h) => h.id === id);
+  if (idx === -1) return;
+  list.splice(idx, 1);
+  redrawAllTextHighlightsOnPage(pageNum);
+  markDirty();
+}
+
+const NOTE_ICON_SVG = '<svg viewBox="0 0 24 24"><path d="M4 4h16v12H9l-5 4z"/></svg>';
+
+// (Re)paints one page's stored highlights against its *current* text-layer
+// DOM — called after every renderTextLayer() rebuild (zoom/rotation/scroll
+// back into view), the same hook point search highlights use.
+function redrawTextHighlights(pageEl) {
+  const num = +pageEl.dataset.page;
+  const layer = ensureHighlightLayer(pageEl);
+  layer.innerHTML = '';
+  const list = state.textHighlights[num];
+  if (!list || !list.length) return;
+  const container = pageEl.querySelector('.text-layer');
+  const { segs } = buildDomText(collectTextNodes(container));
+  for (const hl of list) {
+    const ranges = rangesForMatch(segs, hl.start, hl.end);
+    const rects = ranges.flatMap((r) => rectsRelativeToPage(r, pageEl));
+    if (!rects.length) continue;
+    for (const rect of rects) {
+      const div = document.createElement('div');
+      div.className = 'text-hl';
+      div.style.left = rect.left + 'px';
+      div.style.top = rect.top + 'px';
+      div.style.width = rect.width + 'px';
+      div.style.height = rect.height + 'px';
+      div.style.background = hl.color;
+      div.dataset.hlId = hl.id;
+      if (hl.note) div.title = hl.note;
+      layer.appendChild(div);
+    }
+    if (hl.note) {
+      const marker = document.createElement('button');
+      marker.type = 'button';
+      marker.className = 'hl-note-marker';
+      const first = rects[0];
+      marker.style.left = Math.max(0, first.left) + 'px';
+      marker.style.top = Math.max(0, first.top - 15) + 'px';
+      marker.dataset.hlId = hl.id;
+      marker.title = hl.note;
+      marker.innerHTML = NOTE_ICON_SVG;
+      layer.appendChild(marker);
+    }
+  }
+}
+function redrawAllTextHighlightsOnPage(num) {
+  const el = pageElByNum(num);
+  if (el && el.dataset.rendered === 'true') redrawTextHighlights(el);
+}
+
+// ---- Floating popovers: selection toolbar + note editor ----
+
+// Clamps a fixed-position floating panel to the viewport, preferring just
+// above the anchor rect (falling back to below it if there's no room) —
+// same idea as positionFindBar()/positionPopover(), just anchored to an
+// arbitrary rect instead of a fixed toolbar button.
+function positionFloating(el, rect) {
+  const margin = 8;
+  let top = rect.top - el.offsetHeight - margin;
+  if (top < 8) top = rect.bottom + margin;
+  top = Math.min(top, window.innerHeight - el.offsetHeight - 8);
+  let left = rect.left;
+  left = Math.min(Math.max(8, left), window.innerWidth - el.offsetWidth - 8);
+  el.style.top = Math.max(8, top) + 'px';
+  el.style.left = left + 'px';
+}
+
+let pendingSelection = null; // { pageNum, start, end, range } — a fresh, unsaved selection
+
+// Reads the current window Selection, restricted to a single page's
+// text-layer (cross-page marking isn't supported — a selection spanning
+// two pages is simply ignored, same as an empty one).
+// A Range boundary container is a text node in the common case, but can
+// also be the element itself (see normalizeToTextBoundary above) — this
+// finds ".text-layer" ancestor either way instead of assuming a text node.
+function closestElement(node) {
+  return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+}
+
+function currentPageTextSelection() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+  const range = sel.getRangeAt(0);
+  const startLayer = closestElement(range.startContainer)?.closest('.text-layer');
+  const endLayer = closestElement(range.endContainer)?.closest('.text-layer');
+  if (!startLayer || !endLayer || startLayer !== endLayer) return null;
+  const pageEl = startLayer.closest('.page');
+  if (!pageEl) return null;
+  const offs = offsetsFromRange(startLayer, range);
+  if (!offs || offs.start === offs.end) return null;
+  return { pageNum: +pageEl.dataset.page, start: offs.start, end: offs.end, range };
+}
+
+function renderSelectionSwatches() {
+  selectionSwatchesEl.innerHTML = '';
+  for (const color of HL_PALETTE) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'hl-swatch';
+    b.style.background = color;
+    b.title = 'Marcar com esta cor';
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!pendingSelection) return;
+      createHighlight(pendingSelection.pageNum, pendingSelection.start, pendingSelection.end, color, null);
+      window.getSelection()?.removeAllRanges();
+      hideSelectionToolbar();
+      toast('Texto marcado.');
+    });
+    selectionSwatchesEl.appendChild(b);
+  }
+}
+renderSelectionSwatches();
+
+function showSelectionToolbar(rect) {
+  selectionToolbar.hidden = false;
+  positionFloating(selectionToolbar, rect);
+}
+function hideSelectionToolbar() {
+  selectionToolbar.hidden = true;
+  pendingSelection = null;
+}
+
+function updateSelectionToolbar() {
+  if (state.tool !== 'select' || !hlNotePopover.hidden) { hideSelectionToolbar(); return; }
+  const sel = currentPageTextSelection();
+  if (!sel) { hideSelectionToolbar(); return; }
+  pendingSelection = sel;
+  const rects = sel.range.getClientRects();
+  const rect = rects[rects.length - 1] || sel.range.getBoundingClientRect();
+  showSelectionToolbar(rect);
+}
+let selDebounce = null;
+document.addEventListener('selectionchange', () => {
+  clearTimeout(selDebounce);
+  selDebounce = setTimeout(updateSelectionToolbar, 40);
+});
+// mousedown on the toolbar would otherwise collapse the page's own text
+// selection before the swatch's click handler gets to read it.
+selectionToolbar.addEventListener('mousedown', (e) => e.preventDefault());
+
+let noteEditorCtx = null; // { mode: 'new'|'edit', pageNum, start, end, color, note, id? }
+
+function renderHlPopoverSwatches(activeColor) {
+  hlPopoverSwatchesEl.innerHTML = '';
+  for (const color of HL_PALETTE) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'hl-swatch' + (color === activeColor ? ' active' : '');
+    b.style.background = color;
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!noteEditorCtx) return;
+      noteEditorCtx.color = color;
+      renderHlPopoverSwatches(color);
+    });
+    hlPopoverSwatchesEl.appendChild(b);
+  }
+}
+
+function openNoteEditor(ctx, anchorRect) {
+  hideSelectionToolbar();
+  noteEditorCtx = ctx;
+  hlNoteTextarea.value = ctx.note || '';
+  renderHlPopoverSwatches(ctx.color);
+  hlNoteRemoveBtn.textContent = ctx.mode === 'edit' ? 'Remover destaque' : 'Cancelar';
+  hlNotePopover.hidden = false;
+  positionFloating(hlNotePopover, anchorRect);
+  hlNoteTextarea.focus();
+}
+function closeNoteEditor() {
+  hlNotePopover.hidden = true;
+  noteEditorCtx = null;
+}
+
+selectionNoteBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (!pendingSelection) return;
+  openNoteEditor(
+    { mode: 'new', pageNum: pendingSelection.pageNum, start: pendingSelection.start, end: pendingSelection.end, color: HL_PALETTE[0], note: '' },
+    selectionToolbar.getBoundingClientRect()
+  );
+});
+
+hlNotePopover.addEventListener('mousedown', (e) => {
+  if (e.target !== hlNoteTextarea) e.preventDefault();
+});
+hlNoteSaveBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (!noteEditorCtx) return;
+  const note = hlNoteTextarea.value.trim();
+  const { mode, pageNum, color } = noteEditorCtx;
+  if (mode === 'new') {
+    createHighlight(pageNum, noteEditorCtx.start, noteEditorCtx.end, color, note || null);
+    window.getSelection()?.removeAllRanges();
+  } else {
+    updateHighlight(pageNum, noteEditorCtx.id, { color, note: note || null });
+  }
+  closeNoteEditor();
+  toast(note ? 'Nota salva.' : 'Destaque salvo.');
+});
+hlNoteRemoveBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (!noteEditorCtx) return;
+  if (noteEditorCtx.mode === 'edit') {
+    removeHighlight(noteEditorCtx.pageNum, noteEditorCtx.id);
+    toast('Destaque removido.');
+  }
+  closeNoteEditor();
+});
+
+function openHighlightEditor(pageNum, hl, anchorRect) {
+  openNoteEditor(
+    { mode: 'edit', pageNum, id: hl.id, start: hl.start, end: hl.end, color: hl.color, note: hl.note || '' },
+    anchorRect
+  );
+}
+
+// Click an existing highlight (or its note marker) to review/edit/remove
+// it — works in any tool, not just select, so notes stay reachable while
+// panning. Outside the select tool the text layer has pointer-events:none,
+// so a click lands directly on the highlight-layer's own .text-hl/marker.
+pagesEl.addEventListener('click', (e) => {
+  const target = e.target.closest('.hl-note-marker, .text-hl');
+  if (target) {
+    e.stopPropagation();
+    const pageEl = target.closest('.page');
+    const num = +pageEl.dataset.page;
+    const hl = findHighlight(num, target.dataset.hlId);
+    if (!hl) return;
+    openHighlightEditor(num, hl, target.getBoundingClientRect());
+    return;
+  }
+
+  // In the select tool the (topmost, span-scoped) text layer swallows the
+  // click before it ever reaches the highlight layer beneath — without
+  // this, a highlight with no note attached had no click target at all
+  // while select was active, and "remove this highlight" was unreachable.
+  // A plain tap (not a drag that just made a new selection) on marked text
+  // routes here to that highlight's editor instead.
+  if (state.tool !== 'select' || !document.caretRangeFromPoint) return;
+  const span = e.target.closest('.text-layer span');
+  if (!span) return;
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed) return; // a real drag-selection — let it be
+  const container = span.closest('.text-layer');
+  const pageEl = container?.closest('.page');
+  if (!pageEl) return;
+  const caret = document.caretRangeFromPoint(e.clientX, e.clientY);
+  if (!caret) return;
+  const offs = offsetsFromRange(container, caret);
+  if (!offs) return;
+  const num = +pageEl.dataset.page;
+  const hit = (state.textHighlights[num] || []).find((h) => offs.start >= h.start && offs.start < h.end);
+  if (!hit) return;
+  e.stopPropagation();
+  openHighlightEditor(num, hit, span.getBoundingClientRect());
+});
+
+// ============================================================
 // Action dispatch
 // ============================================================
 const ACTIONS = {
   open: openViaDialog,
+  find: toggleFindBar,
   toolSelect: () => toggleTool('select'),
   toolPen: () => toggleTool('pen'),
   toolHighlighter: () => toggleTool('highlighter'),
@@ -1669,6 +2508,19 @@ document.addEventListener('click', (e) => {
     closeUiThemeMenu();
   }
 });
+// Same for the note editor — the selection toolbar closes itself instead
+// (selectionchange fires as soon as the click lands, before this handler
+// runs, and its own handlers stopPropagation() so this never fights them).
+document.addEventListener('click', (e) => {
+  if (!hlNotePopover.hidden && !e.target.closest('#hl-note-popover')) closeNoteEditor();
+});
+// Repositioning a floating popover mid-scroll is more churn than it's
+// worth — just close it, same as the theme popovers would if they could
+// scroll away.
+viewer.addEventListener('scroll', () => {
+  hideSelectionToolbar();
+  if (!hlNotePopover.hidden) closeNoteEditor();
+});
 window.addEventListener('keyup', (e) => {
   if (e.key === ' ' && spaceHeld) {
     spaceHeld = false;
@@ -1718,6 +2570,7 @@ window.addEventListener('resize', () => {
   clearTimeout(window._rz);
   window._rz = setTimeout(() => {
     positionShoveButtons();
+    if (!findBar.hidden) positionFindBar();
     if (!state.pdf) return;
     relayoutScratchAll(); // margin widths depend on viewer.clientWidth
     renderVisible();

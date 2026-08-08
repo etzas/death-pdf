@@ -157,6 +157,45 @@
     <button class="shove-btn" id="shove-right-btn" data-action="shoveLeft" title="Empurrar PDF para a esquerda (abre rascunho a direita)" hidden>
       <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
     </button>
+
+    <!-- ===================== FIND BAR (Ctrl+F) ===================== -->
+    <div id="find-bar" hidden>
+      <input type="text" id="find-input" placeholder="Pesquisar no PDF" autocomplete="off" spellcheck="false" />
+      <span id="find-count">0/0</span>
+      <button class="tb-btn" id="find-prev-btn" title="Anterior (Shift+Enter)">
+        <svg viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6"/></svg>
+      </button>
+      <button class="tb-btn" id="find-next-btn" title="Proximo (Enter)">
+        <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div class="find-divider"></div>
+      <button class="tb-btn" id="find-close-btn" title="Fechar (Esc)">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <!-- ===================== TEXT SELECTION TOOLBAR ===================== -->
+    <!-- Shown above a fresh text selection (select tool). Swatches mark
+         instantly in that color; the note button opens hl-note-popover. -->
+    <div id="selection-toolbar" hidden>
+      <div class="hl-swatches" id="selection-swatches"></div>
+      <div class="find-divider"></div>
+      <button class="tb-btn" id="selection-note-btn" title="Adicionar nota">
+        <svg viewBox="0 0 24 24"><path d="M4 4h16v12H9l-5 4z"/></svg>
+      </button>
+    </div>
+
+    <!-- ===================== HIGHLIGHT / NOTE EDITOR ===================== -->
+    <!-- Reused for a brand-new selection's note and for editing/removing an
+         existing highlight (click its marker, or the highlight itself). -->
+    <div id="hl-note-popover" hidden>
+      <div class="hl-swatches" id="hl-popover-swatches"></div>
+      <textarea id="hl-note-textarea" placeholder="Escreva uma nota..." rows="4"></textarea>
+      <div class="hl-note-actions">
+        <button class="ghost-btn" id="hl-note-remove-btn">Cancelar</button>
+        <button class="hl-save-btn" id="hl-note-save-btn">Salvar</button>
+      </div>
+    </div>
   </main>
 
   <!-- ===================== STATUS ===================== -->
