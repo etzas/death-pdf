@@ -359,28 +359,34 @@ input[type='range']::-webkit-slider-thumb {
   min-height: 0;
   overflow: auto;
   background: var(--bg);
-  scrollbar-width: thin;
-  scrollbar-color: var(--line) transparent;
 }
-#viewer::-webkit-scrollbar { width: 56px; height: 38px; }
+/* No scrollbar-width/scrollbar-color here on purpose: Chromium/Electron
+   forces a slim "overlay" scrollbar mode whenever those standard properties
+   are set alongside the ::-webkit-scrollbar-* rules below, which shrinks the
+   thumb and buttons no matter what size is requested. Firefox (the only
+   engine that reads scrollbar-width/-color) never renders this app, so
+   dropping them is free and lets our custom thumb/button sizing apply. */
+#viewer::-webkit-scrollbar { width: 17px; height: 14px; }
 #viewer::-webkit-scrollbar-track { background: var(--surface); }
 #viewer::-webkit-scrollbar-thumb {
-  background: var(--scroll-thumb); border-radius: 19px;
-  border: 5px solid var(--surface); min-height: 40px;
+  background: var(--scroll-thumb); border-radius: 8px;
+  border: 2px solid var(--surface); min-height: 48px; min-width: 48px;
 }
 #viewer::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
-/* Bigger, clearly clickable scroll arrows at the ends of the bar. The
-   vertical (up/down page-scrolling) bar and its buttons are noticeably
-   larger than the horizontal one, since that's the one used constantly. */
+/* Clearly clickable scroll arrows at the ends of the bar, close to the OS's
+   own scrollbar-button proportions rather than the app's old oversized ones. */
 #viewer::-webkit-scrollbar-button:single-button {
   background: var(--surface-2);
-  height: 308px; width: 308px;
+  height: 14px; width: 14px;
   background-repeat: no-repeat;
   background-position: center;
-  background-size: 26px;
+  background-size: 9px;
 }
 #viewer::-webkit-scrollbar-button:single-button:vertical {
-  width: 1000px; height: 1000px; background-size: 1000px;
+  width: 17px; height: 17px; background-size: 10px;
+}
+#viewer::-webkit-scrollbar-button:single-button:horizontal {
+  width: 17px; height: 14px; background-size: 9px;
 }
 #viewer::-webkit-scrollbar-button:single-button:hover { background-color: var(--line); }
 /* Up */
@@ -487,6 +493,16 @@ input[type='range']::-webkit-slider-thumb {
 }
 .page .text-layer span.markedContent { top: 0; height: 0; }
 .page .text-layer ::selection { background: rgba(56, 189, 248, 0.35); }
+/* Surfaces a highlighted span's actual glyphs (see redrawTextHighlights()
+   in JS) — the text layer is normally fully transparent, real text lives
+   in the PDF canvas underneath, which the dark/inverted PDF themes flip to
+   near-white via a filter that this layer is NOT subject to. Only `color`
+   is overridden here — font-family/size/weight are left untouched
+   (inherited from the pdf.js span this wraps), so the overlay lines up
+   exactly with the glyph underneath instead of a bolder/wider face
+   ghosting past its edges. Specificity note: two classes beats the plain
+   ".text-layer span" type selector above, so this doesn't need !important. */
+.page .text-layer .hl-text { color: #000; }
 /* Text is only interactive in the select tool — otherwise it would swallow
    pan-drags and steal drawing input from the layer above it.
    The container itself stays pointer-events:none even here — only the
@@ -537,12 +553,40 @@ input[type='range']::-webkit-slider-thumb {
 }
 
 /* Cursors per tool */
-#viewer[data-tool='pen'] .page,
-#viewer[data-tool='highlighter'] .page { cursor: crosshair; }
-#viewer[data-tool='eraser'] .page { cursor: cell; }
+#viewer[data-tool='pen'] .page { cursor: crosshair; }
 #viewer[data-tool='pan'] { cursor: grab; }
 #viewer[data-tool='pan'].grabbing { cursor: grabbing; }
 #viewer[data-tool='select'] .page { cursor: default; }
+
+/* Highlighter/eraser get a round brush-size preview (see #brush-preview)
+   instead of the plain crosshair/cell cursor, so their own OS cursor is
+   hidden while it's shown. */
+#viewer[data-tool='highlighter'] .page,
+#viewer[data-tool='eraser'] .page { cursor: none; }
+
+/* Brush-size preview: a ring, centered on the pointer, sized to match the
+   exact area the highlighter stroke or eraser touch will cover — the same
+   idea as a round brush cursor in a paint program. Lives directly under
+   #viewer (not inside a page), positioned in viewport coordinates via
+   left/top + translate(-50%,-50%), so it tracks the pointer smoothly across
+   page seams and margins without being clipped by any one page's bounds. */
+#brush-preview {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  box-sizing: border-box;
+}
+#brush-preview.brush-highlighter {
+  border: 1.5px solid rgba(0, 0, 0, 0.55);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.65);
+}
+#brush-preview.brush-eraser {
+  border: 1.5px solid var(--text);
+  background: rgba(128, 128, 128, 0.18);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5);
+}
 
 /* While a drawing tool is active, stop the browser/tablet from turning a
    pen drag into a scroll/pan gesture — the stroke must stay on the canvas. */

@@ -193,6 +193,7 @@ const toolOptions = document.getElementById('tool-options');
 const swatchesEl = document.getElementById('swatches');
 const widthSlider = document.getElementById('width-slider');
 const widthLabel = document.getElementById('width-label');
+const brushPreview = document.getElementById('brush-preview');
 const darkBtn = document.getElementById('dark-btn');
 const themeMenu = document.getElementById('theme-menu');
 const uiThemeBtn = document.getElementById('ui-theme-btn');
@@ -1153,7 +1154,7 @@ function onDrawPointerUp() {
       if (!entry.stroke.points.length) continue;
       const key = entry.surface.key;
       (state.annotations[key] ||= []).push(entry.stroke);
-      entries.push({ pageNum: key, strokes: entry.before });
+      entries.push({ pageNum: key, kind: 'strokes', list: entry.before });
       redrawSurface(entry.surface); // clean composited redraw (fixes highlighter overlap)
     }
     if (entries.length) {
@@ -1164,7 +1165,7 @@ function onDrawPointerUp() {
   }
   if (erasingState) {
     const entries = [];
-    for (const [key, before] of erasingState.touched) entries.push({ pageNum: key, strokes: before });
+    for (const [key, before] of erasingState.touched) entries.push({ pageNum: key, kind: 'strokes', list: before });
     if (entries.length) {
       pushUndo(entries);
       markDirty();
@@ -1178,6 +1179,43 @@ function initDrawingInput() {
   pagesEl.addEventListener('pointermove', onDrawPointerMove);
   pagesEl.addEventListener('pointerup', onDrawPointerUp);
   pagesEl.addEventListener('pointercancel', onDrawPointerUp);
+  pagesEl.addEventListener('pointermove', onBrushPreviewMove);
+  pagesEl.addEventListener('pointerenter', onBrushPreviewMove);
+  pagesEl.addEventListener('pointerleave', hideBrushPreview);
+}
+
+// ============================================================
+// Brush-size preview (highlighter / eraser)
+// ============================================================
+// A ring centered on the pointer, sized to the exact diameter of the area
+// the next highlighter stroke or eraser touch will cover — same idea as a
+// round brush cursor in a paint program, so users can see how big a swipe
+// will land before committing to it. Only shown for tools whose "size"
+// is otherwise invisible until you've already drawn/erased something.
+function currentBrushDiameter() {
+  return state.tool === 'eraser' ? state.eraserWidth : state.hlWidth;
+}
+function updateBrushPreviewSize() {
+  if (brushPreview.hidden) return;
+  const d = currentBrushDiameter();
+  brushPreview.style.width = d + 'px';
+  brushPreview.style.height = d + 'px';
+}
+function onBrushPreviewMove(e) {
+  if (state.tool !== 'highlighter' && state.tool !== 'eraser') {
+    hideBrushPreview();
+    return;
+  }
+  brushPreview.className = state.tool === 'eraser' ? 'brush-eraser' : 'brush-highlighter';
+  brushPreview.style.left = e.clientX + 'px';
+  brushPreview.style.top = e.clientY + 'px';
+  if (brushPreview.hidden) {
+    brushPreview.hidden = false;
+    updateBrushPreviewSize();
+  }
+}
+function hideBrushPreview() {
+  brushPreview.hidden = true;
 }
 
 function eraseAtSurface(surface, clientX, clientY, erasing) {
@@ -1212,9 +1250,20 @@ function eraseAtSurface(surface, clientX, clientY, erasing) {
 function clone(x) {
   return JSON.parse(JSON.stringify(x));
 }
-// Each undo/redo entry is an array of { pageNum, strokes } — usually one
-// page, but a stroke that crosses a page boundary touches two, and both
-// must undo/redo together as a single atomic operation.
+// Each undo/redo entry is an array of { pageNum, kind, list } — usually one
+// entry, but a stroke that crosses a page boundary touches two surfaces,
+// and both must undo/redo together as a single atomic operation. `kind`
+// picks which per-page store the entry belongs to ('strokes' — pen/
+// highlighter/eraser ink — or 'hl' — real text highlights/notes), so pen
+// strokes and text marks share one linear history: Ctrl+Z undoes
+// whichever kind of change happened last.
+function storeFor(kind) {
+  return kind === 'hl' ? state.textHighlights : state.annotations;
+}
+function redrawFor(kind, pageNum) {
+  if (kind === 'hl') redrawAllTextHighlightsOnPage(pageNum);
+  else redrawPage(pageNum);
+}
 function pushUndo(entries) {
   if (!entries || !entries.length) return;
   state.undoStack.push(entries);
@@ -1224,13 +1273,14 @@ function pushUndo(entries) {
 function undo() {
   const entries = state.undoStack.pop();
   if (!entries) return;
-  const redoEntries = entries.map(({ pageNum }) => ({
+  const redoEntries = entries.map(({ pageNum, kind }) => ({
     pageNum,
-    strokes: clone(state.annotations[pageNum] || []),
+    kind,
+    list: clone(storeFor(kind)[pageNum] || []),
   }));
-  for (const { pageNum, strokes } of entries) {
-    state.annotations[pageNum] = clone(strokes);
-    redrawPage(pageNum);
+  for (const { pageNum, kind, list } of entries) {
+    storeFor(kind)[pageNum] = clone(list);
+    redrawFor(kind, pageNum);
   }
   state.redoStack.push(redoEntries);
   markDirty();
@@ -1238,13 +1288,14 @@ function undo() {
 function redo() {
   const entries = state.redoStack.pop();
   if (!entries) return;
-  const undoEntries = entries.map(({ pageNum }) => ({
+  const undoEntries = entries.map(({ pageNum, kind }) => ({
     pageNum,
-    strokes: clone(state.annotations[pageNum] || []),
+    kind,
+    list: clone(storeFor(kind)[pageNum] || []),
   }));
-  for (const { pageNum, strokes } of entries) {
-    state.annotations[pageNum] = clone(strokes);
-    redrawPage(pageNum);
+  for (const { pageNum, kind, list } of entries) {
+    storeFor(kind)[pageNum] = clone(list);
+    redrawFor(kind, pageNum);
   }
   state.undoStack.push(undoEntries);
   markDirty();
@@ -1269,7 +1320,7 @@ function clearCurrentPage() {
   const num = getCurrentPage();
   const before = clone(state.annotations[num] || []);
   if (!before.length) return;
-  pushUndo([{ pageNum: num, strokes: before }]);
+  pushUndo([{ pageNum: num, kind: 'strokes', list: before }]);
   state.annotations[num] = [];
   redrawPage(num);
   markDirty();
@@ -1386,6 +1437,10 @@ function setTheme(id) {
   darkBtn.classList.toggle('on', id !== 'none');
   localStorage.setItem('deathpdf.theme', id);
   renderThemeMenu();
+  // Whether a highlight's text gets the solid-black overlay (see
+  // redrawTextHighlights) depends on this theme — but toggling it doesn't
+  // itself re-render any page, so nothing would refresh without this.
+  refreshAllTextHighlights();
 }
 // Quick toggle bound to the keyboard shortcut: flips between the current
 // dark theme and "none".
@@ -1491,6 +1546,7 @@ function setTool(tool) {
     .querySelectorAll('#tool-group .tool')
     .forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
   renderToolOptions();
+  if (tool !== 'highlighter' && tool !== 'eraser') hideBrushPreview();
   if (tool !== 'select') {
     // Marking only makes sense while the select tool is live — drop any
     // leftover native selection and its toolbar so it doesn't linger,
@@ -1515,7 +1571,7 @@ function renderToolOptions() {
   if (state.tool === 'eraser') {
     widthLabel.textContent = 'Tamanho';
     widthSlider.min = 6;
-    widthSlider.max = 80;
+    widthSlider.max = 200;
     widthSlider.value = state.eraserWidth;
   } else {
     const palette = state.tool === 'pen' ? PEN_PALETTE : HL_PALETTE;
@@ -1536,7 +1592,7 @@ function renderToolOptions() {
     if (state.tool === 'pen') {
       widthSlider.min = 1; widthSlider.max = 24; widthSlider.value = state.penWidth;
     } else {
-      widthSlider.min = 6; widthSlider.max = 48; widthSlider.value = state.hlWidth;
+      widthSlider.min = 6; widthSlider.max = 120; widthSlider.value = state.hlWidth;
     }
   }
 }
@@ -1546,6 +1602,7 @@ widthSlider.addEventListener('input', () => {
   if (state.tool === 'pen') state.penWidth = v;
   else if (state.tool === 'highlighter') state.hlWidth = v;
   else if (state.tool === 'eraser') state.eraserWidth = v;
+  updateBrushPreviewSize();
 });
 // Once the drag/keyboard adjustment ends, release focus so the slider
 // doesn't keep swallowing keyboard shortcuts (tool switching, arrows, etc.)
@@ -1727,8 +1784,20 @@ const searchState = {
   currentRanges: null, // Range[] for the current match (rarely more than one)
 };
 
+// Case- and accent-insensitive, like a browser's own PDF viewer (searching
+// "algoritmo" should also find "Algoritmo" and "algorítmo"). NFD splits each
+// accented letter into its base letter + combining accent mark(s), which are
+// then stripped — "á" -> "á" -> "a". Every accented character in
+// Portuguese decomposes into exactly one base letter plus marks in the
+// U+0300-U+036F block, so this always maps 1 original character to exactly
+// 1 result character — the position math in buildDomText()/rangesForMatch()
+// (which maps offsets in this normalized string back onto un-normalized DOM
+// text) relies on that alignment.
 function normalizeSearchText(s) {
-  return s.toLowerCase();
+  return s
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase();
 }
 
 // Page text for counting/locating matches — independent of whether the
@@ -1769,9 +1838,11 @@ function collectTextNodes(container) {
   return nodes;
 }
 
-// Concatenates those text nodes into one lowercased string plus a map back
-// from character offsets to (node, offset-within-node), so a match found
-// in the concatenated string can be turned back into real DOM Ranges.
+// Concatenates those text nodes into one case/accent-normalized string plus
+// a map back from character offsets to (node, offset-within-node), so a
+// match found in the concatenated string can be turned back into real DOM
+// Ranges. segs' offsets are measured on the *un-normalized* text, which is
+// safe only because normalizeSearchText() preserves character count 1:1.
 function buildDomText(nodes) {
   let text = '';
   const segs = [];
@@ -1782,7 +1853,7 @@ function buildDomText(nodes) {
     text += val;
     segs.push({ node, start, end: text.length });
   }
-  return { text: text.toLowerCase(), segs };
+  return { text: normalizeSearchText(text), segs };
 }
 
 // A match's [start, end) range in the concatenated string usually falls
@@ -1891,9 +1962,23 @@ async function rebuildMatchCounts() {
     if (p % 8 === 0) updateFindUi(); // live counter while a big doc is still scanning
   }
   if (token !== searchBuildToken) return;
-  if (searchState.total > 0) searchState.current = 0;
+  // Deliberately no auto-jump/auto-select here: typing (or reopening with a
+  // term already set) should only mark the matches that are already on
+  // screen — the first "go to a match" is whatever the user asks for via
+  // next/prev, exactly like a browser's find bar.
   updateFindUi();
-  await jumpToCurrentMatch();
+  refreshAllRenderedPagesHighlights();
+}
+
+// Repaints "all matches" highlights on every page currently rendered (i.e.
+// already has a text layer in the DOM) — used right after the term changes,
+// so matches already on screen light up without jumping/scrolling anywhere.
+// Pages that render later (user scrolls to them) pick up highlights via the
+// hook at the end of renderTextLayer().
+function refreshAllRenderedPagesHighlights() {
+  pagesEl.querySelectorAll('.page[data-rendered="true"]').forEach((pageEl) => {
+    refreshPageSearchHighlights(pageEl);
+  });
 }
 
 // Scrolls just enough to center the current match, without fighting any
@@ -1931,12 +2016,16 @@ async function jumpToCurrentMatch() {
 
 function nextMatch() {
   if (!searchState.total) return;
-  searchState.current = (searchState.current + 1) % searchState.total;
+  // No match selected yet (just opened/typed) — next goes to the first one.
+  searchState.current = searchState.current < 0 ? 0 : (searchState.current + 1) % searchState.total;
   jumpToCurrentMatch();
 }
 function prevMatch() {
   if (!searchState.total) return;
-  searchState.current = (searchState.current - 1 + searchState.total) % searchState.total;
+  // No match selected yet — previous wraps around to the last one.
+  searchState.current = searchState.current < 0
+    ? searchState.total - 1
+    : (searchState.current - 1 + searchState.total) % searchState.total;
   jumpToCurrentMatch();
 }
 
@@ -2114,6 +2203,7 @@ function mergeOverlappingHighlights(pageNum, start, end) {
 }
 
 function createHighlight(pageNum, start, end, color, note) {
+  const before = clone(state.textHighlights[pageNum] || []);
   const merged = mergeOverlappingHighlights(pageNum, start, end);
   const id = nextHlId();
   (state.textHighlights[pageNum] ||= []).push({
@@ -2123,6 +2213,7 @@ function createHighlight(pageNum, start, end, color, note) {
     color,
     note: note || merged.note || null,
   });
+  pushUndo([{ pageNum, kind: 'hl', list: before }]);
   redrawAllTextHighlightsOnPage(pageNum);
   markDirty();
   return id;
@@ -2130,7 +2221,9 @@ function createHighlight(pageNum, start, end, color, note) {
 function updateHighlight(pageNum, id, patch) {
   const hl = findHighlight(pageNum, id);
   if (!hl) return;
+  const before = clone(state.textHighlights[pageNum] || []);
   Object.assign(hl, patch);
+  pushUndo([{ pageNum, kind: 'hl', list: before }]);
   redrawAllTextHighlightsOnPage(pageNum);
   markDirty();
 }
@@ -2139,7 +2232,9 @@ function removeHighlight(pageNum, id) {
   if (!list) return;
   const idx = list.findIndex((h) => h.id === id);
   if (idx === -1) return;
+  const before = clone(list);
   list.splice(idx, 1);
+  pushUndo([{ pageNum, kind: 'hl', list: before }]);
   redrawAllTextHighlightsOnPage(pageNum);
   markDirty();
 }
@@ -2149,13 +2244,30 @@ const NOTE_ICON_SVG = '<svg viewBox="0 0 24 24"><path d="M4 4h16v12H9l-5 4z"/></
 // (Re)paints one page's stored highlights against its *current* text-layer
 // DOM — called after every renderTextLayer() rebuild (zoom/rotation/scroll
 // back into view), the same hook point search highlights use.
+// The text layer is normally fully transparent — the visible glyphs are
+// baked into the PDF canvas underneath, which the dark/inverted PDF themes
+// flip to near-white via a CSS filter on .pdf-layer (the text layer itself
+// is untouched by that filter). A highlighter color under white-on-dark
+// text is unreadable, so the highlighted characters get their own text
+// surfaced: wrap them in a solid-black span (same font/size/weight as the
+// pdf.js span it wraps — only color changes, so it lines up exactly with
+// the glyph underneath) that sits on top of the highlight regardless of
+// theme. Idempotent — safe to call again on a container it already marked
+// (redrawTextHighlights re-runs on every create/edit/remove, not just on a
+// fresh text-layer rebuild).
+function clearHlTextMarks(container) {
+  container.querySelectorAll('span.hl-text').forEach((el) => el.replaceWith(...el.childNodes));
+  container.normalize();
+}
+
 function redrawTextHighlights(pageEl) {
   const num = +pageEl.dataset.page;
   const layer = ensureHighlightLayer(pageEl);
   layer.innerHTML = '';
+  const container = pageEl.querySelector('.text-layer');
+  clearHlTextMarks(container);
   const list = state.textHighlights[num];
   if (!list || !list.length) return;
-  const container = pageEl.querySelector('.text-layer');
   const { segs } = buildDomText(collectTextNodes(container));
   for (const hl of list) {
     const ranges = rangesForMatch(segs, hl.start, hl.end);
@@ -2185,11 +2297,36 @@ function redrawTextHighlights(pageEl) {
       marker.innerHTML = NOTE_ICON_SVG;
       layer.appendChild(marker);
     }
+    // Only worth it on the dark/inverted PDF themes — that's the one case
+    // the underlying glyphs turn white and a highlighter color under them
+    // gets unreadable. In the normal (unfiltered, already-black-on-white)
+    // theme the original text is already legible, and the overlay would
+    // just double-print the same glyph on top of itself for no benefit.
+    if (state.theme === 'none') continue;
+    // Each sub-range from rangesForMatch is confined to a single text
+    // node, so surroundContents() can't hit its "partially selected a
+    // non-text node" error here — the try/catch is a defensive fallback
+    // only (the colored rect above still marks the text either way).
+    for (const r of ranges) {
+      try {
+        const mark = document.createElement('span');
+        mark.className = 'hl-text';
+        r.surroundContents(mark);
+      } catch {}
+    }
   }
 }
 function redrawAllTextHighlightsOnPage(num) {
   const el = pageElByNum(num);
   if (el && el.dataset.rendered === 'true') redrawTextHighlights(el);
+}
+// Called on theme changes (see setTheme) — whether the solid-black text
+// overlay applies depends on the theme, but switching theme doesn't
+// re-render pages on its own, so every rendered page needs a fresh pass.
+function refreshAllTextHighlights() {
+  pagesEl.querySelectorAll('.page').forEach((el) => {
+    if (el.dataset.rendered === 'true') redrawTextHighlights(el);
+  });
 }
 
 // ---- Floating popovers: selection toolbar + note editor ----
@@ -2481,6 +2618,15 @@ window.addEventListener('keydown', (e) => {
   if (action && ACTIONS[action]) {
     e.preventDefault();
     ACTIONS[action]();
+    return;
+  }
+
+  // Ctrl+Y is the other common "redo" convention (Windows-style, alongside
+  // the configurable Ctrl+Shift+Z above) — always available as a fallback,
+  // unless the user has deliberately rebound some other action onto it.
+  if (combo === 'ctrl+y') {
+    e.preventDefault();
+    redo();
     return;
   }
 
