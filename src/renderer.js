@@ -1732,7 +1732,7 @@ async function exportPdf() {
     }
 
     const bytes = await doc.save();
-    const suggested = state.pdfName.replace(/\.pdf$/i, '') + ' (anotado).pdf';
+    const suggested = state.pdfName.replace(/\.(pdf|epub)$/i, '') + ' (anotado).pdf';
     const saved = await window.dpdf.exportPdf(suggested, bytes);
     toast(saved ? 'PDF exportado.' : 'Exportacao cancelada.');
   } catch (err) {

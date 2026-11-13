@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
 const crypto = require('crypto');
+const { epubToPdf } = require('./epub');
 
 // On Linux (esp. VMs like AlmaLinux) the GPU path spams benign
 // "GetVSyncParametersIfAvailable() failed" errors. Software rendering
@@ -20,7 +21,7 @@ ipcMain.on('state:setDirty', (_e, value) => {
 });
 
 function pdfFromArgs(argv) {
-  return argv.find((a) => typeof a === 'string' && a.toLowerCase().endsWith('.pdf')) || null;
+  return argv.find((a) => typeof a === 'string' && /\.(pdf|epub)$/i.test(a)) || null;
 }
 
 // Single instance: opening a PDF while the app runs reuses the window.
@@ -110,8 +111,12 @@ app.on('window-all-closed', () => {
 
 ipcMain.handle('dialog:openPdf', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-    title: 'Abrir PDF',
-    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    title: 'Abrir PDF ou EPUB',
+    filters: [
+      { name: 'PDF ou EPUB', extensions: ['pdf', 'epub'] },
+      { name: 'PDF', extensions: ['pdf'] },
+      { name: 'EPUB', extensions: ['epub'] },
+    ],
     properties: ['openFile', 'multiSelections'],
   });
   if (canceled || !filePaths.length) return null;
@@ -121,7 +126,11 @@ ipcMain.handle('dialog:openPdf', async () => {
 ipcMain.handle('file:readPdf', async (_e, filePath) => readPdf(filePath));
 
 async function readPdf(filePath) {
-  const data = await fs.readFile(filePath);
+  // EPUBs are converted to PDF on the fly (see epub.js); annotations stay
+  // keyed by the .epub path.
+  const data = /\.epub$/i.test(filePath)
+    ? await epubToPdf(filePath)
+    : await fs.readFile(filePath);
   return {
     path: filePath,
     name: path.basename(filePath),

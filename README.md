@@ -5,6 +5,10 @@ as cores do PDF, caneta sensivel a pressao (mesa digitalizadora), marca-texto,
 borracha e **todos os atalhos configuraveis**.
 
 Alvo principal: **Windows**. Desenvolvimento/teste: **Linux (AlmaLinux 9)**.
+Abre tambem livros **EPUB**: o app converte o EPUB para PDF na hora (com
+cache, entao reabrir e instantaneo) e todas as ferramentas — caneta,
+marca-texto, busca, temas e exportacao — funcionam igual.
+
 Feito com Electron + PDF.js. Roda offline (PDF.js e pdf-lib ja vem embutidos).
 
 ---

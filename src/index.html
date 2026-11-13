@@ -16,7 +16,7 @@
   <!-- ===================== TAB BAR ===================== -->
   <div id="tabbar" hidden>
     <div id="tabs"></div>
-    <button class="tb-btn" id="tab-add-btn" data-action="open" title="Abrir PDF (nova aba)">
+    <button class="tb-btn" id="tab-add-btn" data-action="open" title="Abrir PDF ou EPUB (nova aba)">
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
     </button>
   </div>
@@ -30,7 +30,7 @@
     <div class="tb-divider"></div>
 
     <div class="tb-group">
-      <button class="tb-btn" data-action="open" title="Abrir PDF">
+      <button class="tb-btn" data-action="open" title="Abrir PDF ou EPUB">
         <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
       </button>
     </div>
@@ -145,8 +145,8 @@
   <main id="viewer">
     <div id="empty-state">
       <span class="empty-mark">Death<span class="empty-tail">PDF</span></span>
-      <p>Abra um PDF para comecar.</p>
-      <button class="ghost-btn" data-action="open">Abrir PDF</button>
+      <p>Abra um PDF ou EPUB para comecar.</p>
+      <button class="ghost-btn" data-action="open">Abrir PDF / EPUB</button>
       <p class="hint">Atalho: <kbd id="hint-open">Ctrl+O</kbd></p>
     </div>
     <div id="pages"></div>
